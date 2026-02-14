@@ -239,6 +239,7 @@ export class StatusLineComponent implements Component {
 			cacheRead: 0,
 			cacheWrite: 0,
 			cost: 0,
+			calls: 0,
 		};
 
 		// Get context percentage

@@ -989,6 +989,8 @@ export interface UsageStatistics {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
+	/** Number of sub-LLM calls (from RLM iterations) */
+	calls: number;
 }
 
 function getTaskToolUsage(details: unknown): Usage | undefined {
@@ -1084,7 +1086,7 @@ export class SessionManager {
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
 	#leafId: string | null = null;
-	#usageStatistics: UsageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	#usageStatistics: UsageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
 	#persistWriter: NdjsonFileWriter | undefined;
 	#persistWriterPath: string | undefined;
 	#persistChain: Promise<void> = Promise.resolve();
@@ -1310,7 +1312,7 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#flushed = false;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1324,7 +1326,7 @@ export class SessionManager {
 		this.#byId.clear();
 		this.#labelsById.clear();
 		this.#leafId = null;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
 		for (const entry of this.#fileEntries) {
 			if (entry.type === "session") continue;
 			this.#byId.set(entry.id, entry);
@@ -1490,6 +1492,7 @@ export class SessionManager {
 			this.#usageStatistics.cacheRead += modelUsage.cacheRead;
 			this.#usageStatistics.cacheWrite += modelUsage.cacheWrite;
 			this.#usageStatistics.cost += modelUsage.cost;
+			this.#usageStatistics.calls += modelUsage.calls;
 		}
 	}
 
