@@ -6,14 +6,19 @@
  */
 
 import type { SubLlmUsage } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { isRetryableError, streamSimple } from "@oh-my-pi/pi-ai";
+
+/** Type for the stream function signature (defaults to streamSimple from @oh-my-pi/pi-ai). */
+export type StreamFn = (model: Model, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 
 export interface LMHandlerDeps {
 	/** Get the model to use for a given depth level. */
 	getModel: (depth: number) => Model;
 	/** Resolve API key for a provider (goes through full auth pipeline). */
 	getApiKey: (provider: string) => Promise<string | undefined>;
+	/** Optional stream function for testing (defaults to streamSimple). */
+	streamFn?: StreamFn;
 }
 
 interface SingleRequest {
@@ -155,7 +160,8 @@ export class LMHandler {
 		const messages = [{ role: "user" as const, content: request.prompt, timestamp: Date.now() }];
 
 		// Pass signal through to sub-LLM call — aborts when Python client disconnects
-		const stream = await streamSimple(model, { systemPrompt: "", messages, tools: [] }, { apiKey, signal });
+		const doStream = this.#deps.streamFn ?? streamSimple;
+		const stream = doStream(model, { systemPrompt: "", messages, tools: [] }, { apiKey, signal });
 		const result = await stream.result();
 
 		// Accumulate usage per model
