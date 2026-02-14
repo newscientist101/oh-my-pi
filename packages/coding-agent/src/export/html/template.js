@@ -339,11 +339,14 @@
 
           // Apply filter mode
           const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change'].includes(entry.type);
+          // Synthetic user messages are system-injected (e.g., RLM iteration prompts)
+          const isSyntheticUser = entry.type === 'message' && entry.message.role === 'user' && entry.message.synthetic;
           let passesFilter = true;
 
           switch (filterMode) {
             case 'user-only':
-              passesFilter = entry.type === 'message' && entry.message.role === 'user';
+              // Show only real user messages, not synthetic ones
+              passesFilter = entry.type === 'message' && entry.message.role === 'user' && !entry.message.synthetic;
               break;
             case 'no-tools':
               passesFilter = !isSettingsEntry && !(entry.type === 'message' && entry.message.role === 'toolResult');
@@ -355,7 +358,8 @@
               passesFilter = true;
               break;
             default: // 'default'
-              passesFilter = !isSettingsEntry;
+              // Hide settings entries and synthetic user messages by default
+              passesFilter = !isSettingsEntry && !isSyntheticUser;
               break;
           }
 

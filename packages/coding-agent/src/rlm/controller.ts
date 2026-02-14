@@ -9,6 +9,7 @@
  */
 
 import type { AgentMessage, IterationMode, SubLlmUsage } from "@oh-my-pi/pi-agent-core";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import type { LMHandler } from "./lm-handler";
 import { parseRLMTermination } from "./parser";
 
@@ -82,12 +83,13 @@ async function resolveVariable(
 
 /**
  * Build a continuation message for the next iteration.
+ * Marked as synthetic so it can be filtered from exports.
  *
  * @param iterationIndex - Current iteration index (0-based)
  * @param maxIterations - Maximum allowed iterations
  * @returns User message with continuation prompt
  */
-function buildContinuationMessage(iterationIndex: number, maxIterations: number): AgentMessage {
+function buildContinuationMessage(iterationIndex: number, maxIterations: number): UserMessage {
 	const remaining = maxIterations - iterationIndex - 1;
 
 	// Warning when approaching the limit
@@ -104,14 +106,16 @@ function buildContinuationMessage(iterationIndex: number, maxIterations: number)
 			`Iteration ${iterationIndex + 1}/${maxIterations} complete. ` +
 			`Continue your analysis or use FINAL()/FINAL_VAR() when ready.${limitWarning}`,
 		timestamp: Date.now(),
+		synthetic: true,
 	};
 }
 
 /**
  * Build a final iteration message when max iterations is reached.
  * Instructs the agent to provide its best answer immediately.
+ * Marked as synthetic so it can be filtered from exports.
  */
-function buildFinalIterationMessage(): AgentMessage {
+function buildFinalIterationMessage(): UserMessage {
 	return {
 		role: "user",
 		content:
@@ -119,13 +123,15 @@ function buildFinalIterationMessage(): AgentMessage {
 			"Give your best answer now based on what you have so far. " +
 			"Use FINAL(your answer) immediately.",
 		timestamp: Date.now(),
+		synthetic: true,
 	};
 }
 
 /**
  * Build an error recovery message when iteration fails.
+ * Marked as synthetic so it can be filtered from exports.
  */
-function buildErrorRecoveryMessage(error: string): AgentMessage {
+function buildErrorRecoveryMessage(error: string): UserMessage {
 	return {
 		role: "user",
 		content:
@@ -133,6 +139,7 @@ function buildErrorRecoveryMessage(error: string): AgentMessage {
 			"Try a different approach. If you have enough information, " +
 			"use FINAL() to provide your answer.",
 		timestamp: Date.now(),
+		synthetic: true,
 	};
 }
 

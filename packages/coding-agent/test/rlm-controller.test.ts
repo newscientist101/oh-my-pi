@@ -152,6 +152,24 @@ FINAL: Climate change is the main theme
 			}
 		});
 
+		it("marks continuation messages as synthetic for export filtering", async () => {
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("Analysis in progress.");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(followUp?.synthetic).toBe(true);
+			}
+		});
+
 		it("includes warning when approaching iteration limit", async () => {
 			const config: RLMConfig = { maxIterations: 5, maxDepth: 2 };
 			const deps: RLMDeps = {
@@ -198,6 +216,27 @@ FINAL: Climate change is the main theme
 					typeof followUp?.content === "string" && followUp.content.includes("reached the iteration limit"),
 				).toBe(true);
 				expect(typeof followUp?.content === "string" && followUp.content.includes("best answer now")).toBe(true);
+				// Final iteration message should also be synthetic
+				expect(followUp?.synthetic).toBe(true);
+			}
+		});
+
+		it("marks error recovery messages as synthetic", async () => {
+			const executePython = mock(async () => ({ output: "NameError: name 'x' is not defined", exitCode: 1 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(nonexistent)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(followUp?.synthetic).toBe(true);
 			}
 		});
 	});
