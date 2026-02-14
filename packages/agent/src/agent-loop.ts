@@ -271,14 +271,17 @@ async function checkIteration(
 
 	const check = await iteration.checkTermination(lastAssistantMessage);
 
+	// Get sub-LLM usage if available
+	const subLlmUsage = iteration.getUsage?.();
+
 	if (check.done) {
-		stream.push({ type: "iteration_complete", index: iterationIndex, result: check.result });
+		stream.push({ type: "iteration_complete", index: iterationIndex, result: check.result, subLlmUsage });
 		return "stop";
 	}
 
 	// Not done — enforce max iterations (0-indexed, so check against max - 1)
 	if (iterationIndex + 1 >= iteration.maxIterations) {
-		stream.push({ type: "iteration_limit", iterations: iterationIndex + 1 });
+		stream.push({ type: "iteration_limit", iterations: iterationIndex + 1, subLlmUsage });
 		return "stop";
 	}
 

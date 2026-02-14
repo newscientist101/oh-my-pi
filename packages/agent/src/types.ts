@@ -178,6 +178,14 @@ export interface IterationMode {
 	checkTermination(
 		message: AgentMessage,
 	): Promise<{ done: true; result: unknown } | { done: false; followUp: AgentMessage[] }>;
+
+	/**
+	 * Optional: returns accumulated sub-LLM usage for iteration events.
+	 *
+	 * When provided, the agent loop attaches this usage to `iteration_complete`
+	 * and `iteration_limit` events for session-level cost tracking.
+	 */
+	getUsage?: () => Map<string, SubLlmUsage>;
 }
 
 /**

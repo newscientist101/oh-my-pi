@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, SubLlmUsage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Message, TextContent, Usage } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, parseJsonlLenient, Snowflake } from "@oh-my-pi/pi-utils";
 import { getBlobsDir, getAgentDir as getDefaultAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
@@ -1477,6 +1477,20 @@ export class SessionManager {
 	/** Get usage statistics across all assistant messages in the session. */
 	getUsageStatistics(): UsageStatistics {
 		return this.#usageStatistics;
+	}
+
+	/**
+	 * Add sub-LLM usage from iteration events (RLM) to session statistics.
+	 * Sums up usage across all models in the map.
+	 */
+	addSubLlmUsage(usage: Map<string, SubLlmUsage>): void {
+		for (const modelUsage of usage.values()) {
+			this.#usageStatistics.input += modelUsage.input;
+			this.#usageStatistics.output += modelUsage.output;
+			this.#usageStatistics.cacheRead += modelUsage.cacheRead;
+			this.#usageStatistics.cacheWrite += modelUsage.cacheWrite;
+			this.#usageStatistics.cost += modelUsage.cost;
+		}
 	}
 
 	getSessionDir(): string {

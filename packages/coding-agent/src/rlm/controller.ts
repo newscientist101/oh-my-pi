@@ -159,6 +159,9 @@ export function createRLMIterationMode(config: RLMConfig, deps: RLMDeps): Iterat
 	return {
 		maxIterations: config.maxIterations,
 
+		// Provide sub-LLM usage for iteration events
+		getUsage: () => deps.lmHandler.getUsage(),
+
 		async checkTermination(
 			message: AgentMessage,
 		): Promise<{ done: true; result: unknown } | { done: false; followUp: AgentMessage[] }> {

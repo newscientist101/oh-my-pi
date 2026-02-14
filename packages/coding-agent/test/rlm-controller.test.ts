@@ -309,5 +309,30 @@ FINAL: Climate change is the main theme
 
 			expect(mode.maxIterations).toBe(15);
 		});
+
+		it("provides getUsage that delegates to lmHandler", () => {
+			const mockUsage = new Map([
+				["claude-sonnet-4-20250514", { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01, calls: 2 }],
+			]);
+			const mockHandler = {
+				...createMockLMHandler(),
+				getUsage: () => mockUsage,
+			} as unknown as LMHandler;
+
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: mockHandler,
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+
+			expect(mode.getUsage).toBeDefined();
+			const usage = mode.getUsage!();
+			expect(usage.size).toBe(1);
+			const modelUsage = usage.get("claude-sonnet-4-20250514");
+			expect(modelUsage?.input).toBe(100);
+			expect(modelUsage?.output).toBe(50);
+			expect(modelUsage?.calls).toBe(2);
+		});
 	});
 });

@@ -565,6 +565,11 @@ export class AgentSession {
 			}
 		}
 
+		// Handle iteration events - fold sub-LLM usage into session statistics
+		if ((event.type === "iteration_complete" || event.type === "iteration_limit") && event.subLlmUsage) {
+			this.sessionManager.addSubLlmUsage(event.subLlmUsage);
+		}
+
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end" && this.#lastAssistantMessage) {
 			const msg = this.#lastAssistantMessage;
