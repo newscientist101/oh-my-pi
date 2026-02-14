@@ -770,10 +770,12 @@ function formatStatusEventExpanded(event: PythonStatusEvent, theme: Theme): stri
 	lines.push(formatStatusEvent(event, theme));
 
 	// Add detail lines for operations with list data
+	// Sanitizes output with replaceTabs and truncateToWidth to prevent TUI corruption
 	const addItems = (items: unknown[], formatter: (item: unknown) => string, max = 5) => {
 		const arr = Array.isArray(items) ? items : [];
 		for (let i = 0; i < Math.min(arr.length, max); i++) {
-			lines.push(`   ${theme.fg("dim", formatter(arr[i]))}`);
+			const formatted = truncateToWidth(replaceTabs(formatter(arr[i])), 80);
+			lines.push(`   ${theme.fg("dim", formatted)}`);
 		}
 		if (arr.length > max) {
 			lines.push(`   ${theme.fg("dim", `… ${arr.length - max} more`)}`);
@@ -795,7 +797,8 @@ function formatStatusEventExpanded(event: PythonStatusEvent, theme: Theme): stri
 	switch (op) {
 		case "find":
 		case "glob":
-			if (data.matches) addItems(data.matches as unknown[], m => String(m));
+			// File paths - use shortenPath to replace home directory with ~
+			if (data.matches) addItems(data.matches as unknown[], m => shortenPath(String(m)));
 			break;
 		case "ls":
 			if (data.items) addItems(data.items as unknown[], m => String(m));
