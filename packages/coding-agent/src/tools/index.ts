@@ -104,6 +104,23 @@ export type ContextFileEntry = {
 };
 
 /** Session context for tool factories */
+/**
+ * RLM (Recursive Language Model) state for the Python tool.
+ * When present, the Python tool will inject RLM prelude on first execution.
+ */
+export interface RLMToolState {
+	/** LM handler URL (e.g., "http://127.0.0.1:12345") */
+	handlerUrl: string;
+	/** Session token for authorization */
+	token: string;
+	/** Current recursion depth */
+	depth: number;
+	/** Context data to make available (string for text, object for JSON) */
+	context: unknown;
+	/** Request timeout in seconds (default: 300) */
+	timeout?: number;
+}
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -157,6 +174,8 @@ export interface ToolSession {
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Get compact conversation context for subagents (excludes tool results, system prompts) */
 	getCompactContext?: () => string;
+	/** RLM state (when active, Python tool injects prelude on first execution) */
+	rlm?: RLMToolState;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;

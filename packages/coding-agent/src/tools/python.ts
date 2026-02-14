@@ -13,6 +13,7 @@ import type { PreludeHelper, PythonStatusEvent } from "../ipy/kernel";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import type { Theme } from "../modes/theme/theme";
 import pythonDescription from "../prompts/tools/python.md" with { type: "text" };
+import { setupKernelForRLM } from "../rlm";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
 import { getTreeBranch, getTreeContinuePrefix, renderCodeCell } from "../tui";
 import type { ToolSession } from ".";
@@ -141,6 +142,41 @@ export function getPythonToolDescription(): string {
 
 export interface PythonToolOptions {
 	proxyExecutor?: PythonProxyExecutor;
+}
+
+/**
+ * Track RLM injection state per kernel session.
+ * Key is sessionId, value is cleanup function (or null if cleanup already called).
+ */
+const rlmInjectionState = new Map<string, (() => Promise<void>) | null>();
+
+/**
+ * Clear RLM injection state for a specific session.
+ * Called when RLM mode is stopped to clean up temp files.
+ */
+export async function clearRLMInjectionState(sessionId: string): Promise<void> {
+	const cleanup = rlmInjectionState.get(sessionId);
+	if (cleanup) {
+		await cleanup();
+	}
+	rlmInjectionState.delete(sessionId);
+}
+
+/**
+ * Clear all RLM injection state.
+ * Called on process exit or full cleanup.
+ */
+export async function clearAllRLMInjectionState(): Promise<void> {
+	for (const [_sessionId, cleanup] of rlmInjectionState) {
+		if (cleanup) {
+			try {
+				await cleanup();
+			} catch {
+				// Ignore cleanup errors
+			}
+		}
+	}
+	rlmInjectionState.clear();
 }
 
 export class PythonTool implements AgentTool<typeof pythonSchema> {
@@ -275,6 +311,50 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 				sessionFile: sessionFile ?? undefined,
 				artifactsDir: artifactsDir ?? undefined,
 			};
+
+			// RLM prelude injection: inject on first execution or after kernel restart
+			const rlm = this.session.rlm;
+			if (rlm) {
+				const needsInjection = !rlmInjectionState.has(sessionId) || reset;
+				if (needsInjection) {
+					// Clean up previous injection state if re-injecting
+					const existingCleanup = rlmInjectionState.get(sessionId);
+					if (existingCleanup) {
+						await existingCleanup();
+					}
+
+					// Create wrapper that calls executePython with the right options
+					const execWrapper = async (code: string, _opts?: { silent?: boolean; storeHistory?: boolean }) => {
+						const result = await executePython(code, {
+							...baseExecutorOptions,
+							reset: false, // Don't reset during setup injection
+						});
+						return {
+							status: (result.exitCode === 0 ? "ok" : "error") as "ok" | "error",
+							error: result.exitCode !== 0 ? { value: result.output } : undefined,
+						};
+					};
+
+					const setupResult = await setupKernelForRLM(
+						rlm.context,
+						{
+							handlerUrl: rlm.handlerUrl,
+							token: rlm.token,
+							depth: rlm.depth,
+							timeout: rlm.timeout,
+						},
+						execWrapper,
+					);
+
+					if (!setupResult.ok) {
+						// Setup failed - don't track injection state, allow retry
+						throw new ToolError(`RLM setup failed: ${setupResult.error}`);
+					}
+
+					// Track injection state with cleanup function
+					rlmInjectionState.set(sessionId, setupResult.cleanup);
+				}
+			}
 
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i];
