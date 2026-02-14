@@ -134,6 +134,21 @@ describe("RLM Context Transfer", () => {
 		const depth = 0;
 		const contextPath = "/tmp/rlm_ctx_test.txt";
 
+		it("sets context as plain variable, not property descriptor", () => {
+			// Text context
+			const textCell = buildSetupCell(handlerUrl, token, depth, contextPath, true);
+			// Should use simple assignment, not property()
+			expect(textCell).toMatch(/^context = /m);
+			expect(textCell).not.toContain("property(");
+			expect(textCell).not.toContain("@property");
+
+			// JSON context
+			const jsonCell = buildSetupCell(handlerUrl, token, depth, "/tmp/test.json", false);
+			expect(jsonCell).toMatch(/^context = /m);
+			expect(jsonCell).not.toContain("property(");
+			expect(jsonCell).not.toContain("@property");
+		});
+
 		it("builds text context setup cell", () => {
 			const cell = buildSetupCell(handlerUrl, token, depth, contextPath, true);
 

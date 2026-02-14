@@ -110,6 +110,9 @@ export function buildSetupCell(
 
 	if (isText) {
 		// Text context: read as plain string
+		// NOTE: `context` is set as a plain variable assignment, NOT a property() descriptor.
+		// This is intentional - property() only works on classes, not module-level variables.
+		// A plain assignment in IPython's user namespace is the correct approach.
 		return `${rlmPrelude}
 
 _configure('${escapedUrl}', '${escapedToken}', depth=${depth}, timeout=${timeout})
@@ -117,7 +120,8 @@ context = open('${escapedPath}', 'r', encoding='utf-8').read()
 `;
 	}
 
-	// JSON context: parse as JSON
+	// JSON context: parse as JSON, then clean up the json import
+	// NOTE: `context` is set as a plain variable assignment (not a property descriptor)
 	return `${rlmPrelude}
 
 _configure('${escapedUrl}', '${escapedToken}', depth=${depth}, timeout=${timeout})
