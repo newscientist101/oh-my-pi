@@ -4,6 +4,7 @@ import {
 	type ContextTransferResult,
 	getContextType,
 	RLM_PRELUDE,
+	setupKernelForRLM,
 	writeContextToTempFile,
 } from "../src/rlm/context-transfer";
 
@@ -207,6 +208,154 @@ describe("RLM Context Transfer", () => {
 			expect(RLM_PRELUDE).toContain("def SHOW_VARS");
 			expect(RLM_PRELUDE).toContain("def _configure");
 			expect(RLM_PRELUDE).toContain("def _lm_request");
+		});
+	});
+
+	describe("setupKernelForRLM", () => {
+		const handlerOptions = {
+			handlerUrl: "http://127.0.0.1:12345",
+			token: "test-token",
+			depth: 0,
+		};
+
+		it("succeeds when Python execution succeeds", async () => {
+			const executedCodes: string[] = [];
+			const mockExecutePython = async (code: string) => {
+				executedCodes.push(code);
+				return { status: "ok" as const };
+			};
+
+			const result = await setupKernelForRLM("test context", handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(true);
+			expect(result.error).toBeUndefined();
+
+			// Should have executed setup cell
+			expect(executedCodes.length).toBe(1);
+			expect(executedCodes[0]).toContain("_configure");
+			expect(executedCodes[0]).toContain("context = open");
+
+			// Cleanup
+			await result.cleanup();
+		});
+
+		it("returns error when Python execution fails", async () => {
+			const mockExecutePython = async () => {
+				return { status: "error" as const, error: { value: "SyntaxError: invalid syntax" } };
+			};
+
+			const result = await setupKernelForRLM("test context", handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(false);
+			expect(result.error).toBe("SyntaxError: invalid syntax");
+
+			// Cleanup should still work
+			await result.cleanup();
+		});
+
+		it("returns error when Python throws exception", async () => {
+			const mockExecutePython = async () => {
+				throw new Error("Kernel connection lost");
+			};
+
+			const result = await setupKernelForRLM("test context", handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(false);
+			expect(result.error).toBe("Kernel connection lost");
+
+			// Cleanup should still work
+			await result.cleanup();
+		});
+
+		it("passes correct options to setup cell", async () => {
+			let executedCode = "";
+			const mockExecutePython = async (code: string) => {
+				executedCode = code;
+				return { status: "ok" as const };
+			};
+
+			const options = {
+				handlerUrl: "http://127.0.0.1:9999",
+				token: "my-secret-token",
+				depth: 2,
+				timeout: 600,
+			};
+
+			const result = await setupKernelForRLM({ key: "value" }, options, mockExecutePython);
+
+			expect(result.ok).toBe(true);
+			expect(executedCode).toContain("http://127.0.0.1:9999");
+			expect(executedCode).toContain("my-secret-token");
+			expect(executedCode).toContain("depth=2");
+			expect(executedCode).toContain("timeout=600");
+			// JSON context should use json.loads
+			expect(executedCode).toContain("_json.loads");
+
+			await result.cleanup();
+		});
+
+		it("executes setup cell with silent mode options", async () => {
+			let executionOptions: Record<string, unknown> | undefined;
+			const mockExecutePython = async (_code: string, opts?: Record<string, unknown>) => {
+				executionOptions = opts;
+				return { status: "ok" as const };
+			};
+
+			const result = await setupKernelForRLM("test", handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(true);
+			expect(executionOptions).toEqual({ silent: true, storeHistory: false });
+
+			await result.cleanup();
+		});
+
+		it("creates temp file with context", async () => {
+			let setupCode = "";
+			const mockExecutePython = async (code: string) => {
+				setupCode = code;
+				return { status: "ok" as const };
+			};
+
+			const testContext = "This is the context data";
+			const result = await setupKernelForRLM(testContext, handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(true);
+
+			// Extract temp file path from setup code
+			const pathMatch = setupCode.match(/open\('([^']+)'/);
+			expect(pathMatch).not.toBeNull();
+
+			const tempPath = pathMatch![1];
+			const fileContent = await Bun.file(tempPath).text();
+			expect(fileContent).toBe(testContext);
+
+			// Cleanup removes the temp file
+			await result.cleanup();
+			const existsAfter = await Bun.file(tempPath).exists();
+			expect(existsAfter).toBe(false);
+		});
+
+		it("keeps temp file on failure for retry", async () => {
+			let setupCode = "";
+			const mockExecutePython = async (code: string) => {
+				setupCode = code;
+				return { status: "error" as const, error: { value: "Failed" } };
+			};
+
+			const result = await setupKernelForRLM("test context", handlerOptions, mockExecutePython);
+
+			expect(result.ok).toBe(false);
+
+			// Extract temp file path
+			const pathMatch = setupCode.match(/open\('([^']+)'/);
+			const tempPath = pathMatch![1];
+
+			// File should still exist for retry
+			const existsAfterFailure = await Bun.file(tempPath).exists();
+			expect(existsAfterFailure).toBe(true);
+
+			// Manual cleanup
+			await result.cleanup();
 		});
 	});
 });

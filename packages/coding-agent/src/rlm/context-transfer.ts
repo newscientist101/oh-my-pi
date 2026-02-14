@@ -131,3 +131,99 @@ del _json
  * RLM prelude content for direct injection or testing.
  */
 export const RLM_PRELUDE = rlmPrelude;
+
+/**
+ * Options for setting up the kernel for RLM mode.
+ */
+export interface RLMKernelSetupOptions {
+	/** LM handler URL (e.g., "http://127.0.0.1:12345") */
+	handlerUrl: string;
+	/** Session token for authorization */
+	token: string;
+	/** Current recursion depth */
+	depth: number;
+	/** Request timeout in seconds (default: 300) */
+	timeout?: number;
+}
+
+/**
+ * Result of setting up the kernel for RLM mode.
+ */
+export interface RLMKernelSetupResult {
+	/** Whether setup was successful */
+	ok: boolean;
+	/** Error message if setup failed */
+	error?: string;
+	/** Cleanup function to remove temp file (call only on success) */
+	cleanup: () => Promise<void>;
+}
+
+/**
+ * Type for the executePython function signature.
+ * Allows for dependency injection in tests.
+ */
+export type ExecutePythonFn = (
+	code: string,
+	options?: { silent?: boolean; storeHistory?: boolean },
+) => Promise<{ status: "ok" | "error"; error?: { value: string } }>;
+
+/**
+ * Sets up the Python kernel for RLM mode.
+ *
+ * This:
+ * 1. Writes context to a temp file
+ * 2. Builds and executes the setup cell silently
+ * 3. Returns cleanup function (call only on success)
+ *
+ * The `context` variable becomes available in the Python namespace after setup.
+ *
+ * @param context - The context data to make available (string for text, object for JSON)
+ * @param options - LM handler configuration
+ * @param executePython - Function to execute Python code in the kernel
+ * @returns Setup result with ok status and cleanup function
+ */
+export async function setupKernelForRLM(
+	context: RLMContext,
+	options: RLMKernelSetupOptions,
+	executePython: ExecutePythonFn,
+): Promise<RLMKernelSetupResult> {
+	// Write context to temp file
+	const transfer = await writeContextToTempFile(context);
+
+	try {
+		// Build the setup cell
+		const setupCell = buildSetupCell(
+			options.handlerUrl,
+			options.token,
+			options.depth,
+			transfer.contextPath,
+			transfer.isText,
+			options.timeout ?? 300,
+		);
+
+		// Execute setup cell silently
+		const result = await executePython(setupCell, { silent: true, storeHistory: false });
+
+		if (result.status === "error") {
+			// Setup failed - keep temp file for retry/debugging
+			return {
+				ok: false,
+				error: result.error?.value ?? "Unknown error during RLM setup",
+				cleanup: transfer.cleanup,
+			};
+		}
+
+		// Setup succeeded - cleanup will remove the temp file
+		return {
+			ok: true,
+			cleanup: transfer.cleanup,
+		};
+	} catch (err) {
+		// Error during execution - keep temp file for retry
+		return {
+			ok: false,
+			error: err instanceof Error ? err.message : String(err),
+			cleanup: transfer.cleanup,
+		};
+	}
+}

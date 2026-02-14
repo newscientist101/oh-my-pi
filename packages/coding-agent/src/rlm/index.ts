@@ -11,9 +11,13 @@
 export {
 	buildSetupCell,
 	type ContextTransferResult,
+	type ExecutePythonFn,
 	getContextType,
 	RLM_PRELUDE,
 	type RLMContext,
+	type RLMKernelSetupOptions,
+	type RLMKernelSetupResult,
+	setupKernelForRLM,
 	writeContextToTempFile,
 } from "./context-transfer";
 export {
