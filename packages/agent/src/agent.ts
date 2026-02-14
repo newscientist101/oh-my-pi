@@ -26,6 +26,7 @@ import type {
 	AgentState,
 	AgentTool,
 	AgentToolContext,
+	IterationMode,
 	StreamFn,
 	ThinkingLevel,
 	ToolCallContext,
@@ -132,6 +133,12 @@ export interface AgentOptions {
 	 * Cursor tool result callback for exec tool responses.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+
+	/**
+	 * Iteration mode for autonomous multi-turn operations (e.g., RLM).
+	 * When set, the agent loop will call checkTermination after each turn.
+	 */
+	iteration?: IterationMode;
 }
 
 export interface AgentPromptOptions {
@@ -178,6 +185,7 @@ export class Agent {
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
+	#iteration?: IterationMode;
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -204,6 +212,7 @@ export class Agent {
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
+		this.#iteration = opts.iteration;
 	}
 
 	/**
@@ -329,6 +338,10 @@ export class Agent {
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
 		this.#steeringMode = mode;
+	}
+
+	setIteration(mode: IterationMode | undefined) {
+		this.#iteration = mode;
 	}
 
 	getSteeringMode(): "all" | "one-at-a-time" {
@@ -619,6 +632,7 @@ export class Agent {
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			kimiApiFormat: this.#kimiApiFormat,
 			preferWebsockets: this.#preferWebsockets,
+			iteration: this.#iteration,
 			toolChoice: options?.toolChoice,
 			convertToLlm: this.#convertToLlm,
 			transformContext: this.#transformContext,

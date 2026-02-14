@@ -936,6 +936,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		await controller.handle(text);
 	}
 
+	handleRlmCommand(argsText: string): Promise<void> {
+		return this.#commandController.handleRlmCommand(argsText);
+	}
+
 	handleCompactCommand(customInstructions?: string): Promise<void> {
 		return this.#commandController.handleCompactCommand(customInstructions);
 	}

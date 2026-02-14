@@ -148,6 +148,7 @@ const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "move", description: "Move session to a different working directory", inlineHint: "<path>" },
 	{ name: "exit", description: "Exit the application" },
 	{ name: "quit", description: "Quit the application" },
+	{ name: "rlm", description: "Start RLM mode with context", inlineHint: "<@file|url> [question]" },
 ];
 
 /**

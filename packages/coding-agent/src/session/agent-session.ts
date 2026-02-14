@@ -71,7 +71,9 @@ import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from
 import type { PlanModeState } from "../plan-mode/state";
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
+import rlmSystemPrompt from "../prompts/system/rlm-system.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import { createRLMIterationMode, LMHandler, type RLMConfig, setupKernelForRLM } from "../rlm";
 import { closeAllConnections } from "../ssh/connection-manager";
 import { unmountAll } from "../ssh/sshfs-mount";
 import { outputMeta } from "../tools/output-meta";
@@ -341,6 +343,16 @@ export class AgentSession {
 	#streamingEditFileCache = new Map<string, string>();
 	#promptInFlight = false;
 	#providerSessionState = new Map<string, ProviderSessionState>();
+
+	// RLM (Recursive Language Model) state
+	#rlmState: {
+		lmHandler: LMHandler;
+		context: unknown;
+		depth: number;
+		abortController: AbortController;
+		previousAutoCompactionEnabled: boolean;
+		cleanup?: () => Promise<void>;
+	} | null = null;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -895,6 +907,7 @@ export class AgentSession {
 	 */
 	async dispose(): Promise<void> {
 		await this.sessionManager.flush();
+		await this.stopRlm(); // Clean up RLM state if active
 		await cleanupSshResources();
 		for (const state of this.#providerSessionState.values()) {
 			state.close();
@@ -1793,6 +1806,192 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
+	// ─────────────────────────────────────────────────────────────────────────
+	// RLM (Recursive Language Model) Mode
+	// ─────────────────────────────────────────────────────────────────────────
+
+	/**
+	 * Check if RLM mode is currently active.
+	 */
+	get isRlmActive(): boolean {
+		return this.#rlmState !== null;
+	}
+
+	/**
+	 * Start RLM mode with context.
+	 *
+	 * Creates an LM handler for sub-LLM calls, injects the RLM prelude into
+	 * the Python kernel, augments the system prompt, and sets up iteration mode.
+	 *
+	 * @param context - The context data (string or JSON object) to make available in Python
+	 * @param options - RLM options (prompt, maxIterations, maxDepth)
+	 */
+	async startRlm(
+		context: unknown,
+		options: {
+			prompt?: string;
+			maxIterations?: number;
+			maxDepth?: number;
+		} = {},
+	): Promise<void> {
+		if (this.#rlmState) {
+			throw new Error("RLM mode is already active. Call stopRlm() first.");
+		}
+
+		const { prompt = "", maxIterations = 10, maxDepth = 1 } = options;
+
+		// Disable auto-compaction during RLM iterations (bounded by maxIterations)
+		const previousAutoCompactionEnabled = this.autoCompactionEnabled;
+		this.setAutoCompactionEnabled(false);
+		this.abortCompaction();
+
+		// Create abort controller for RLM-specific operations
+		const abortController = new AbortController();
+
+		// Create LM handler for sub-LLM calls
+		const lmHandler = new LMHandler({
+			getModel: (_depth: number) => {
+				// Route model by depth: depth 0 = main model, depth 1+ = sub model (fallback to main)
+				// For now, always use the main model
+				return this.model!;
+			},
+			getApiKey: provider => this.#modelRegistry.getApiKeyForProvider(provider),
+		});
+		lmHandler.start();
+
+		// Create executePython adapter that matches ExecutePythonFn signature
+		const executePythonForRLM = async (
+			code: string,
+			_options?: { silent?: boolean; storeHistory?: boolean },
+		): Promise<{ status: "ok" | "error"; error?: { value: string } }> => {
+			// Note: The actual executor doesn't support silent/storeHistory options.
+			// These options are for IPython kernel semantics which we don't expose here.
+			const result = await executePythonCommand(code, {
+				cwd: this.sessionManager.getCwd(),
+				signal: abortController.signal,
+			});
+			return {
+				status: result.exitCode === 0 ? "ok" : "error",
+				error: result.exitCode !== 0 ? { value: result.output } : undefined,
+			};
+		};
+
+		// Set up kernel with RLM prelude and context
+		let cleanup: (() => Promise<void>) | undefined;
+		try {
+			const kernelSetup = await setupKernelForRLM(
+				context,
+				{
+					handlerUrl: lmHandler.url,
+					token: lmHandler.token,
+					depth: 0,
+				},
+				executePythonForRLM,
+			);
+
+			if (!kernelSetup.ok) {
+				lmHandler.stop();
+				this.setAutoCompactionEnabled(previousAutoCompactionEnabled);
+				throw new Error(`Failed to set up Python kernel for RLM: ${kernelSetup.error}`);
+			}
+
+			cleanup = kernelSetup.cleanup;
+		} catch (err) {
+			lmHandler.stop();
+			this.setAutoCompactionEnabled(previousAutoCompactionEnabled);
+			throw err;
+		}
+
+		// Store RLM state
+		this.#rlmState = {
+			lmHandler,
+			context,
+			depth: 0,
+			abortController,
+			previousAutoCompactionEnabled,
+			cleanup,
+		};
+
+		// Create iteration mode with RLM checkTermination
+		const rlmConfig: RLMConfig = { maxIterations, maxDepth };
+		const iterationMode = createRLMIterationMode(rlmConfig, {
+			executePython: async (code: string, signal?: AbortSignal) => {
+				const result = await executePythonCommand(code, {
+					cwd: this.sessionManager.getCwd(),
+					signal,
+				});
+				return { output: result.output, exitCode: result.exitCode };
+			},
+			lmHandler,
+			signal: abortController.signal,
+		});
+
+		// Wire iteration mode into agent
+		this.agent.setIteration(iterationMode);
+
+		// Augment system prompt with RLM instructions
+		const contextType = typeof context === "string" ? "string" : "JSON";
+		const contextLength = typeof context === "string" ? context.length : JSON.stringify(context).length;
+		const contextPreview =
+			typeof context === "string"
+				? context.slice(0, 100).replace(/\n/g, " ")
+				: JSON.stringify(context).slice(0, 100);
+
+		const rlmPromptSection = renderPromptTemplate(rlmSystemPrompt, {
+			contextType,
+			contextLength: contextLength.toLocaleString(),
+			contextPreview: contextPreview.length < contextLength ? `${contextPreview}...` : contextPreview,
+		});
+
+		const augmentedPrompt = `${this.#baseSystemPrompt}\n\n${rlmPromptSection}`;
+		this.agent.setSystemPrompt(augmentedPrompt);
+
+		// Send initial prompt to agent
+		if (prompt) {
+			await this.prompt(prompt);
+		}
+	}
+
+	/**
+	 * Stop RLM mode and clean up resources.
+	 *
+	 * Stops the LM handler, clears iteration mode, and restores the base system prompt.
+	 */
+	async stopRlm(): Promise<void> {
+		if (!this.#rlmState) {
+			return; // Already stopped or never started
+		}
+
+		const { lmHandler, abortController, previousAutoCompactionEnabled, cleanup } = this.#rlmState;
+
+		// Abort any in-flight RLM operations
+		abortController.abort();
+
+		// Clean up temp file
+		if (cleanup) {
+			try {
+				await cleanup();
+			} catch {
+				// Ignore cleanup errors
+			}
+		}
+
+		// Stop LM handler
+		lmHandler.stop();
+
+		// Clear iteration mode
+		this.agent.setIteration(undefined);
+
+		// Restore base system prompt
+		this.agent.setSystemPrompt(this.#baseSystemPrompt);
+
+		// Restore auto-compaction setting
+		this.setAutoCompactionEnabled(previousAutoCompactionEnabled);
+
+		// Clear state
+		this.#rlmState = null;
+	}
+
 	/**
 	 * Start a new session, optionally with initial messages and parent tracking.
 	 * Clears all messages and starts a new session.
@@ -1817,6 +2016,7 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort();
+		await this.stopRlm(); // Clean up RLM state if active
 		this.agent.reset();
 		await this.sessionManager.flush();
 		await this.sessionManager.newSession(options);

@@ -352,6 +352,14 @@ export class InputController {
 				return;
 			}
 
+			// Handle RLM (Recursive Language Model) mode
+			if (text === "/rlm" || text.startsWith("/rlm ")) {
+				const args = text.slice(4).trim();
+				this.ctx.editor.setText("");
+				await this.ctx.handleRlmCommand(args);
+				return;
+			}
+
 			// Handle skill commands (/skill:name [args])
 			if (text.startsWith("/skill:")) {
 				const spaceIndex = text.indexOf(" ");

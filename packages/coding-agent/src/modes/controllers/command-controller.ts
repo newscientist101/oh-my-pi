@@ -719,6 +719,127 @@ export class CommandController {
 		}
 		this.ctx.ui.requestRender();
 	}
+
+	/**
+	 * Handle /rlm command to start RLM mode with context.
+	 * Usage: /rlm <@file|url|inline> [question]
+	 */
+	async handleRlmCommand(argsText: string): Promise<void> {
+		if (!argsText) {
+			this.ctx.showError("Usage: /rlm <@file|url> [question]");
+			return;
+		}
+
+		// Split only the first token (context source); keep the rest as raw text
+		// so quotes and special characters in the question are preserved.
+		const spaceIdx = argsText.search(/\s/);
+		const contextSource = spaceIdx === -1 ? argsText : argsText.slice(0, spaceIdx);
+		const prompt = spaceIdx === -1 ? "" : argsText.slice(spaceIdx).trim();
+
+		// Limits
+		const MAX_FILE_SIZE = 5_000_000; // 5MB
+		const MAX_FETCH_SIZE = 5_000_000; // 5MB
+		const FETCH_TIMEOUT = 10_000; // 10s
+
+		// Load context
+		let context: unknown;
+		try {
+			if (contextSource.startsWith("@")) {
+				// File reference: @path/to/file
+				const relativePath = contextSource.slice(1);
+				const cwd = this.ctx.sessionManager.getCwd();
+				const filePath = resolveToCwd(relativePath, cwd);
+
+				// Check file size before reading
+				const file = Bun.file(filePath);
+				const fileSize = file.size;
+				if (fileSize > MAX_FILE_SIZE) {
+					this.ctx.showError(
+						`File too large: ${(fileSize / 1_000_000).toFixed(1)}MB (limit ${MAX_FILE_SIZE / 1_000_000}MB)`,
+					);
+					return;
+				}
+
+				const content = await file.text();
+
+				// JSON detection by extension
+				if (filePath.endsWith(".json") || filePath.endsWith(".json5")) {
+					try {
+						context = Bun.JSON5.parse(content);
+					} catch (parseErr) {
+						this.ctx.showError(
+							`Invalid JSON in ${relativePath}: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+						);
+						return;
+					}
+				} else {
+					context = content;
+				}
+			} else if (contextSource.startsWith("http://") || contextSource.startsWith("https://")) {
+				// URL fetch
+				const response = await fetch(contextSource, {
+					signal: AbortSignal.timeout(FETCH_TIMEOUT),
+				});
+
+				if (!response.ok) {
+					this.ctx.showError(`Failed to fetch ${contextSource}: HTTP ${response.status}`);
+					return;
+				}
+
+				// Check content-length if available
+				const contentLength = response.headers.get("content-length");
+				if (contentLength && parseInt(contentLength, 10) > MAX_FETCH_SIZE) {
+					this.ctx.showError(`Remote content too large (limit ${MAX_FETCH_SIZE / 1_000_000}MB)`);
+					return;
+				}
+
+				const text = await response.text();
+				if (text.length > MAX_FETCH_SIZE) {
+					this.ctx.showError(
+						`Remote content too large: ${(text.length / 1_000_000).toFixed(1)}MB (limit ${MAX_FETCH_SIZE / 1_000_000}MB)`,
+					);
+					return;
+				}
+
+				// JSON detection by content-type
+				const contentType = response.headers.get("content-type") ?? "";
+				if (contentType.includes("application/json")) {
+					try {
+						context = Bun.JSON5.parse(text);
+					} catch (parseErr) {
+						this.ctx.showError(
+							`Invalid JSON from URL: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+						);
+						return;
+					}
+				} else {
+					context = text;
+				}
+			} else {
+				// Inline context (the first token is the context itself)
+				// This is for very simple cases like: /rlm "some text" what does this mean?
+				if (contextSource.length > MAX_FILE_SIZE) {
+					this.ctx.showError(`Inline context too large (limit ${MAX_FILE_SIZE / 1_000_000}MB)`);
+					return;
+				}
+				context = contextSource;
+			}
+		} catch (err) {
+			if (err instanceof Error && err.name === "TimeoutError") {
+				this.ctx.showError(`Failed to load context: Request timed out after ${FETCH_TIMEOUT / 1000}s`);
+			} else {
+				this.ctx.showError(`Failed to load context: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			return;
+		}
+
+		// Delegate RLM setup to AgentSession
+		try {
+			await this.ctx.session.startRlm(context, { prompt });
+		} catch (err) {
+			this.ctx.showError(`Failed to start RLM mode: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
 }
 
 const BAR_WIDTH = 24;
