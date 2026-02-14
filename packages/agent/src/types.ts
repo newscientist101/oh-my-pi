@@ -103,8 +103,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Called when the agent has no more tool calls and no steering messages.
 	 * If messages are returned, they're added to the context and the agent
 	 * continues with another turn.
+	 *
+	 * When `iteration` is set, this hook is still called but only if the
+	 * iteration predicate does not produce follow-up messages itself.
 	 */
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+
+	/**
+	 * Optional iteration mode for multi-turn autonomous loops.
+	 *
+	 * When set, the agent loop calls `checkTermination` after each turn
+	 * completes (assistant response + tool results). The predicate decides
+	 * whether to stop or inject follow-up messages for the next turn.
+	 *
+	 * The loop enforces `maxIterations` as a hard cap.
+	 */
+	iteration?: IterationMode;
 
 	/**
 	 * Provides tool execution context, resolved per tool call.
@@ -125,6 +139,46 @@ export interface ToolCallContext {
  * Note: "xhigh" is only supported by OpenAI gpt-5.1-codex-max, gpt-5.2, gpt-5.2-codex, gpt-5.3, and gpt-5.3-codex models.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+/**
+ * Per-model usage from sub-LLM calls (e.g., RLM llm_query).
+ *
+ * Tracks token consumption and cost for sub-agent calls made during
+ * iteration modes. Keyed by model ID (e.g., "claude-sonnet-4-20250514").
+ */
+export interface SubLlmUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	calls: number;
+}
+
+/**
+ * Pluggable iteration mode for multi-turn autonomous loops (e.g., RLM).
+ *
+ * When set on `AgentLoopConfig`, the agent loop calls `checkTermination` after each
+ * assistant response (once tool calls are resolved). The implementation decides whether
+ * to stop or continue by returning follow-up messages.
+ *
+ * The agent loop enforces `maxIterations` — if the predicate hasn't terminated by then,
+ * the loop emits an `iteration_limit` event and stops.
+ */
+export interface IterationMode {
+	/** Hard cap on autonomous iterations before the loop force-stops. */
+	maxIterations: number;
+
+	/**
+	 * Inspect the last assistant message and decide what to do.
+	 *
+	 * @returns `done: true` with a result to stop the loop, or
+	 *          `done: false` with follow-up messages to continue.
+	 */
+	checkTermination(
+		message: AgentMessage,
+	): Promise<{ done: true; result: unknown } | { done: false; followUp: AgentMessage[] }>;
+}
 
 /**
  * Extensible interface for custom app messages.
@@ -258,4 +312,7 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean }
+	// Iteration lifecycle (when IterationMode is active)
+	| { type: "iteration_complete"; index: number; result: unknown; subLlmUsage?: Map<string, SubLlmUsage> }
+	| { type: "iteration_limit"; iterations: number; subLlmUsage?: Map<string, SubLlmUsage> };
