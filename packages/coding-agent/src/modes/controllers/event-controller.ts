@@ -1,6 +1,7 @@
 import { Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import { IterationCompleteComponent, IterationLimitComponent } from "../../modes/components/iteration-status";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
 import { TodoReminderComponent } from "../../modes/components/todo-reminder";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
@@ -375,6 +376,20 @@ export class EventController {
 
 			case "todo_reminder": {
 				const component = new TodoReminderComponent(event.todos, event.attempt, event.maxAttempts);
+				this.ctx.chatContainer.addChild(component);
+				this.ctx.ui.requestRender();
+				break;
+			}
+
+			case "iteration_complete": {
+				const component = new IterationCompleteComponent(event.index, event.subLlmUsage);
+				this.ctx.chatContainer.addChild(component);
+				this.ctx.ui.requestRender();
+				break;
+			}
+
+			case "iteration_limit": {
+				const component = new IterationLimitComponent(event.iterations, event.subLlmUsage);
 				this.ctx.chatContainer.addChild(component);
 				this.ctx.ui.requestRender();
 				break;
