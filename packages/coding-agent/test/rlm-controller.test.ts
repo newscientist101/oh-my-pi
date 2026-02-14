@@ -335,4 +335,445 @@ FINAL: Climate change is the main theme
 			expect(modelUsage?.calls).toBe(2);
 		});
 	});
+
+	describe("FINAL_VAR round-trip", () => {
+		it("resolves string variable correctly", async () => {
+			const executePython = mock(async () => ({ output: "'Hello, World!'", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(greeting)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("'Hello, World!'");
+			}
+			expect(executePython).toHaveBeenCalledWith("print(repr(greeting))", undefined);
+		});
+
+		it("resolves integer variable correctly", async () => {
+			const executePython = mock(async () => ({ output: "42\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(count)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("42");
+			}
+		});
+
+		it("resolves list variable correctly", async () => {
+			const executePython = mock(async () => ({ output: "['a', 'b', 'c']\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(items)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("['a', 'b', 'c']");
+			}
+		});
+
+		it("resolves dict variable correctly", async () => {
+			const executePython = mock(async () => ({ output: "{'key': 'value', 'count': 3}\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(result_dict)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("{'key': 'value', 'count': 3}");
+			}
+		});
+
+		it("resolves variable with underscores in name", async () => {
+			const executePython = mock(async () => ({ output: "'final answer'\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(_final_answer_1)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("'final answer'");
+			}
+			expect(executePython).toHaveBeenCalledWith("print(repr(_final_answer_1))", undefined);
+		});
+
+		it("resolves multiline variable output correctly", async () => {
+			const multilineOutput = "'Line 1\\nLine 2\\nLine 3'";
+			const executePython = mock(async () => ({ output: `${multilineOutput}\n`, exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(text)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe(multilineOutput);
+			}
+		});
+
+		it("handles FINAL_VAR in rlm fence block", async () => {
+			const executePython = mock(async () => ({ output: "'from fence'\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage(`
+I have computed the result:
+
+\`\`\`rlm
+FINAL_VAR: summary
+\`\`\`
+`);
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("'from fence'");
+			}
+			expect(executePython).toHaveBeenCalledWith("print(repr(summary))", undefined);
+		});
+	});
+
+	describe("iteration counter progression", () => {
+		it("increments iteration count on each call without termination", async () => {
+			const config: RLMConfig = { maxIterations: 10, maxDepth: 2 };
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+			const message = createAssistantMessage("Working...");
+
+			// First call - iteration counter increments to 1, shows "Iteration 2/10" (counter+1)
+			let result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 2/10")).toBe(true);
+			}
+
+			// Second call - iteration counter increments to 2, shows "Iteration 3/10"
+			result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 3/10")).toBe(true);
+			}
+
+			// Third call - iteration counter increments to 3, shows "Iteration 4/10"
+			result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 4/10")).toBe(true);
+			}
+		});
+
+		it("terminates early when FINAL is detected without further incrementing", async () => {
+			const config: RLMConfig = { maxIterations: 10, maxDepth: 2 };
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+
+			// First call - no termination, counter increments to 1
+			let result = await mode.checkTermination(createAssistantMessage("Working..."));
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 2/10")).toBe(true);
+			}
+
+			// Second call - FINAL detected, terminates without incrementing
+			result = await mode.checkTermination(createAssistantMessage("FINAL(Done!)"));
+			expect(result.done).toBe(true);
+			if (result.done) {
+				expect(result.result).toBe("Done!");
+			}
+		});
+	});
+
+	describe("max iterations limit", () => {
+		it("completes full iteration sequence from start to end", async () => {
+			const config: RLMConfig = { maxIterations: 5, maxDepth: 2 };
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+			const message = createAssistantMessage("Still working...");
+
+			// Call 1: counter=1, shows "Iteration 2/5", no warning (remaining=3)
+			let result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 2/5 complete")).toBe(
+					true,
+				);
+				expect(
+					typeof followUp?.content === "string" && !followUp.content.includes("approaching the iteration limit"),
+				).toBe(true);
+			}
+
+			// Call 2: counter=2, shows "Iteration 3/5", warning (remaining=2)
+			result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 3/5 complete")).toBe(
+					true,
+				);
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("approaching the iteration limit"),
+				).toBe(true);
+			}
+
+			// Call 3: counter=3, shows "Iteration 4/5", warning (remaining=1)
+			result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Iteration 4/5 complete")).toBe(
+					true,
+				);
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("approaching the iteration limit"),
+				).toBe(true);
+			}
+
+			// Call 4: counter=4, triggers final iteration message (counter+1 >= maxIterations)
+			result = await mode.checkTermination(message);
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("reached the iteration limit"),
+				).toBe(true);
+				expect(typeof followUp?.content === "string" && followUp.content.includes("best answer now")).toBe(true);
+			}
+		});
+
+		it("can terminate with FINAL even at max iteration", async () => {
+			const config: RLMConfig = { maxIterations: 3, maxDepth: 2 };
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+
+			// First iteration
+			await mode.checkTermination(createAssistantMessage("Working..."));
+			// Second iteration - at max-1, gets final message
+			const result2 = await mode.checkTermination(createAssistantMessage("Almost done..."));
+			expect(result2.done).toBe(false);
+			if (!result2.done) {
+				const followUp = result2.followUp[0] as UserMessage;
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("reached the iteration limit"),
+				).toBe(true);
+			}
+
+			// Third call - agent responds with FINAL
+			const result3 = await mode.checkTermination(createAssistantMessage("FINAL(My best answer)"));
+			expect(result3.done).toBe(true);
+			if (result3.done) {
+				expect(result3.result).toBe("My best answer");
+			}
+		});
+
+		it("can terminate with FINAL_VAR at max iteration", async () => {
+			const config: RLMConfig = { maxIterations: 2, maxDepth: 2 };
+			const executePython = mock(async () => ({ output: "'computed value'\n", exitCode: 0 }));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+
+			// First iteration - gets final iteration message
+			const result1 = await mode.checkTermination(createAssistantMessage("Computing..."));
+			expect(result1.done).toBe(false);
+			if (!result1.done) {
+				const followUp = result1.followUp[0] as UserMessage;
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("reached the iteration limit"),
+				).toBe(true);
+			}
+
+			// Second call - agent responds with FINAL_VAR
+			const result2 = await mode.checkTermination(createAssistantMessage("FINAL_VAR(my_result)"));
+			expect(result2.done).toBe(true);
+			if (result2.done) {
+				expect(result2.result).toBe("'computed value'");
+			}
+		});
+
+		it("handles single iteration limit (maxIterations=1)", async () => {
+			const config: RLMConfig = { maxIterations: 1, maxDepth: 2 };
+			const deps: RLMDeps = {
+				executePython: mock(async () => ({ output: "", exitCode: 0 })),
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(config, deps);
+
+			// Even first iteration should get the final message
+			const result = await mode.checkTermination(createAssistantMessage("Hello"));
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("reached the iteration limit"),
+				).toBe(true);
+			}
+		});
+	});
+
+	describe("error recovery", () => {
+		it("recovers from FINAL_VAR with undefined variable", async () => {
+			const executePython = mock(async () => ({
+				output: "Traceback (most recent call last):\n  ...\nNameError: name 'undefined_var' is not defined",
+				exitCode: 1,
+			}));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(undefined_var)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Previous attempt failed")).toBe(
+					true,
+				);
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Try a different approach")).toBe(
+					true,
+				);
+			}
+		});
+
+		it("includes error message in recovery prompt", async () => {
+			const errorMessage = "SyntaxError: invalid syntax at line 5";
+			const executePython = mock(async () => ({
+				output: errorMessage,
+				exitCode: 1,
+			}));
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(broken_var)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				// Error message should mention the Python failure
+				expect(
+					typeof followUp?.content === "string" && followUp.content.includes("Failed to resolve variable"),
+				).toBe(true);
+			}
+		});
+
+		it("propagates abort signal to Python execution", async () => {
+			const controller = new AbortController();
+			const executePython = mock(async (_code: string, signal?: AbortSignal) => {
+				// Simulate checking the signal
+				if (signal?.aborted) {
+					throw new Error("Aborted");
+				}
+				return { output: "'result'", exitCode: 0 };
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+				signal: controller.signal,
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(my_var)");
+
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(true);
+			// Verify the signal was passed to executePython
+			expect(executePython).toHaveBeenCalledWith("print(repr(my_var))", controller.signal);
+		});
+
+		it("re-throws when abort signal is aborted", async () => {
+			const controller = new AbortController();
+			const executePython = mock(async (_code: string, _signal?: AbortSignal) => {
+				throw new Error("Execution cancelled");
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+				signal: controller.signal,
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(my_var)");
+
+			// Abort the signal
+			controller.abort();
+
+			// Should re-throw when signal is aborted
+			await expect(mode.checkTermination(message)).rejects.toThrow();
+		});
+	});
 });
