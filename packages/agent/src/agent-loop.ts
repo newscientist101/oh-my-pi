@@ -17,6 +17,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolResult,
+	IterationMode,
 	StreamFn,
 } from "./types";
 
@@ -135,6 +136,7 @@ async function runLoop(
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let firstTurn = true;
+	let iterationIndex = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -142,6 +144,7 @@ async function runLoop(
 	while (true) {
 		let hasMoreToolCalls = true;
 		let steeringAfterTools: AgentMessage[] | null = null;
+		let lastAssistantMessage: AgentMessage | null = null;
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -165,6 +168,7 @@ async function runLoop(
 			// Stream assistant response
 			const message = await streamAssistantResponse(currentContext, config, signal, stream, streamFn);
 			newMessages.push(message);
+			lastAssistantMessage = message;
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				// Create placeholder tool results for any tool calls in the aborted message
@@ -219,10 +223,24 @@ async function runLoop(
 			}
 		}
 
-		// Agent would stop here. Check for follow-up messages.
+		// Agent would stop here. Check iteration mode, then follow-up messages.
+		const iterationFollowUp = lastAssistantMessage
+			? await checkIteration(config.iteration, lastAssistantMessage, iterationIndex, stream)
+			: undefined;
+
+		if (iterationFollowUp === "stop") {
+			break;
+		}
+
+		if (iterationFollowUp && iterationFollowUp.length > 0) {
+			iterationIndex++;
+			pendingMessages = iterationFollowUp;
+			continue;
+		}
+
+		// No iteration follow-up — fall through to generic follow-up hook
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
-			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
 			continue;
 		}
@@ -233,6 +251,38 @@ async function runLoop(
 
 	stream.push({ type: "agent_end", messages: newMessages });
 	stream.end(newMessages);
+}
+
+/**
+ * Check the iteration predicate and enforce maxIterations.
+ *
+ * Returns:
+ * - `undefined` if no iteration mode is active
+ * - `"stop"` if the iteration terminated or hit the limit
+ * - `AgentMessage[]` follow-up messages to continue the loop
+ */
+async function checkIteration(
+	iteration: IterationMode | undefined,
+	lastAssistantMessage: AgentMessage,
+	iterationIndex: number,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+): Promise<AgentMessage[] | "stop" | undefined> {
+	if (!iteration) return undefined;
+
+	const check = await iteration.checkTermination(lastAssistantMessage);
+
+	if (check.done) {
+		stream.push({ type: "iteration_complete", index: iterationIndex, result: check.result });
+		return "stop";
+	}
+
+	// Not done — enforce max iterations (0-indexed, so check against max - 1)
+	if (iterationIndex + 1 >= iteration.maxIterations) {
+		stream.push({ type: "iteration_limit", iterations: iterationIndex + 1 });
+		return "stop";
+	}
+
+	return check.followUp;
 }
 
 /**

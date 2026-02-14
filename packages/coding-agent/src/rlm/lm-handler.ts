@@ -1,0 +1,206 @@
+/**
+ * LM Handler - HTTP server for Python prelude llm_query() calls.
+ *
+ * Provides a local HTTP endpoint that the Python REPL can call to make
+ * sub-LLM queries during RLM iterations. Uses session token auth.
+ */
+
+import type { SubLlmUsage } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { isRetryableError, streamSimple } from "@oh-my-pi/pi-ai";
+
+export interface LMHandlerDeps {
+	/** Get the model to use for a given depth level. */
+	getModel: (depth: number) => Model;
+	/** Resolve API key for a provider (goes through full auth pipeline). */
+	getApiKey: (provider: string) => Promise<string | undefined>;
+}
+
+interface SingleRequest {
+	prompt: string;
+	model?: string;
+	depth?: number;
+}
+
+interface BatchedRequest {
+	prompts: string[];
+	model?: string;
+	depth?: number;
+	batched: true;
+}
+
+type LMRequest = SingleRequest | BatchedRequest;
+
+/**
+ * HTTP server for sub-LLM calls from Python prelude.
+ *
+ * - Binds to localhost only (127.0.0.1)
+ * - Auto-assigns port (port 0)
+ * - Session token auth via Authorization header
+ * - Tracks per-model usage for cost reporting
+ */
+export class LMHandler {
+	#server: Bun.Server<unknown> | null = null;
+	#token = crypto.randomUUID();
+	#usage = new Map<string, SubLlmUsage>();
+	#deps: LMHandlerDeps;
+
+	constructor(deps: LMHandlerDeps) {
+		this.#deps = deps;
+	}
+
+	/** Port the server is listening on (0 if not started). */
+	get port(): number {
+		return this.#server?.port ?? 0;
+	}
+
+	/** URL of the handler (e.g., "http://127.0.0.1:12345"). */
+	get url(): string {
+		return `http://127.0.0.1:${this.port}`;
+	}
+
+	/** Session token for Authorization header. */
+	get token(): string {
+		return this.#token;
+	}
+
+	/** Whether the server is currently running. */
+	get isRunning(): boolean {
+		return this.#server !== null;
+	}
+
+	/**
+	 * Get a snapshot of per-model usage statistics.
+	 * Returns a shallow copy of the usage map.
+	 */
+	getUsage(): Map<string, SubLlmUsage> {
+		return new Map(this.#usage);
+	}
+
+	/** Reset accumulated usage counters. */
+	resetUsage(): void {
+		this.#usage.clear();
+	}
+
+	/**
+	 * Start the HTTP server.
+	 * Safe to call multiple times (no-op if already running).
+	 */
+	start(): void {
+		if (this.#server) return;
+
+		this.#server = Bun.serve({
+			port: 0, // auto-assign
+			hostname: "127.0.0.1", // localhost only
+			fetch: req => this.#handleRequest(req),
+		});
+	}
+
+	/**
+	 * Stop the HTTP server.
+	 * Safe to call multiple times (no-op if not running).
+	 */
+	stop(): void {
+		this.#server?.stop();
+		this.#server = null;
+	}
+
+	async #handleRequest(req: Request): Promise<Response> {
+		// Only accept POST to /
+		if (req.method !== "POST") {
+			return Response.json({ error: "Method not allowed" }, { status: 405 });
+		}
+
+		const url = new URL(req.url);
+		if (url.pathname !== "/") {
+			return Response.json({ error: "Not found" }, { status: 404 });
+		}
+
+		// Auth check
+		const auth = req.headers.get("Authorization");
+		if (auth !== `Bearer ${this.#token}`) {
+			return Response.json({ error: "Unauthorized" }, { status: 401 });
+		}
+
+		try {
+			const body = (await req.json()) as LMRequest;
+
+			// Propagate request.signal — when Python disconnects (KeyboardInterrupt),
+			// Bun aborts this signal, which cancels the in-flight sub-LLM API call.
+			const result =
+				"batched" in body && body.batched
+					? await this.#handleBatched(body, req.signal)
+					: await this.#handleSingle(body as SingleRequest, req.signal);
+
+			return Response.json(result);
+		} catch (e) {
+			// Client disconnected
+			if (req.signal.aborted) {
+				return Response.json({ error: "Client disconnected" }, { status: 499 });
+			}
+
+			const message = e instanceof Error ? e.message : String(e);
+			const retryable = isRetryableError(e);
+			const status = retryable ? 503 : 500;
+
+			return Response.json({ error: message, retryable }, { status });
+		}
+	}
+
+	async #handleSingle(request: SingleRequest, signal?: AbortSignal): Promise<{ content: string }> {
+		const depth = request.depth ?? 0;
+		const model = this.#deps.getModel(depth);
+		const apiKey = await this.#deps.getApiKey(model.provider);
+
+		const messages = [{ role: "user" as const, content: request.prompt, timestamp: Date.now() }];
+
+		// Pass signal through to sub-LLM call — aborts when Python client disconnects
+		const stream = await streamSimple(model, { systemPrompt: "", messages, tools: [] }, { apiKey, signal });
+		const result = await stream.result();
+
+		// Accumulate usage per model
+		this.#accumulateUsage(model.id, result.usage);
+
+		// Extract text content from response
+		const content = result.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("");
+
+		return { content };
+	}
+
+	async #handleBatched(request: BatchedRequest, signal?: AbortSignal): Promise<{ contents: string[] }> {
+		// NOTE: This is a simple parallel implementation, not true batching.
+		// TODO: Add concurrency limits or true provider batch support.
+		const results = await Promise.all(
+			request.prompts.map(prompt =>
+				this.#handleSingle({ prompt, model: request.model, depth: request.depth }, signal),
+			),
+		);
+		return { contents: results.map(r => r.content) };
+	}
+
+	#accumulateUsage(
+		modelId: string,
+		usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } },
+	): void {
+		const prev = this.#usage.get(modelId) ?? {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+			calls: 0,
+		};
+
+		prev.input += usage.input;
+		prev.output += usage.output;
+		prev.cacheRead += usage.cacheRead;
+		prev.cacheWrite += usage.cacheWrite;
+		prev.cost += usage.cost.total;
+		prev.calls += 1;
+
+		this.#usage.set(modelId, prev);
+	}
+}
