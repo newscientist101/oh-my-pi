@@ -88,4 +88,61 @@ describe("MemoryFS via FUSE", () => {
 			code: "ENOENT",
 		});
 	});
+
+	// === Write operations ===
+
+	test("create and read file", async () => {
+		const p = path.join(MOUNT_POINT, "created.txt");
+		await fs.writeFile(p, "new content\n");
+		const content = await fs.readFile(p, "utf-8");
+		expect(content).toBe("new content\n");
+	});
+
+	test("write to existing file", async () => {
+		const p = path.join(MOUNT_POINT, "hello.txt");
+		await fs.writeFile(p, "overwritten\n");
+		const content = await fs.readFile(p, "utf-8");
+		expect(content).toBe("overwritten\n");
+	});
+
+	test("mkdir and readdir", async () => {
+		const dir = path.join(MOUNT_POINT, "newdir");
+		await fs.mkdir(dir);
+		const stat = await fs.stat(dir);
+		expect(stat.isDirectory()).toBe(true);
+		const entries = await fs.readdir(dir);
+		expect(entries).toEqual([]);
+	});
+
+	test("unlink file", async () => {
+		const p = path.join(MOUNT_POINT, "to-delete.txt");
+		await fs.writeFile(p, "delete me");
+		await fs.unlink(p);
+		expect(fs.stat(p)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	test("rmdir empty directory", async () => {
+		const dir = path.join(MOUNT_POINT, "rmdir-test");
+		await fs.mkdir(dir);
+		await fs.rmdir(dir);
+		expect(fs.stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	test("rename file", async () => {
+		const src = path.join(MOUNT_POINT, "rename-src.txt");
+		const dst = path.join(MOUNT_POINT, "rename-dst.txt");
+		await fs.writeFile(src, "rename me");
+		await fs.rename(src, dst);
+		expect(fs.stat(src)).rejects.toMatchObject({ code: "ENOENT" });
+		const content = await fs.readFile(dst, "utf-8");
+		expect(content).toBe("rename me");
+	});
+
+	test("create symlink via filesystem", async () => {
+		const target = path.join(MOUNT_POINT, "hello.txt");
+		const link = path.join(MOUNT_POINT, "new-link");
+		await fs.symlink(target, link);
+		const readTarget = await fs.readlink(link);
+		expect(readTarget).toBe(target);
+	});
 });

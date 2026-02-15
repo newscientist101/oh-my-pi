@@ -42,7 +42,7 @@ fn main() {
 
 	let mut options = Config::default();
 	options.mount_options =
-		vec![MountOption::RO, MountOption::FSName("pi-fuse".to_string()), MountOption::AutoUnmount];
+		vec![MountOption::FSName("pi-fuse".to_string()), MountOption::AutoUnmount];
 	options.acl = SessionACL::All;
 
 	// This blocks until unmounted

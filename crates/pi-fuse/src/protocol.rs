@@ -29,6 +29,38 @@ pub enum Request {
 	/// Read the target of a symbolic link.
 	#[serde(rename = "readlink")]
 	ReadLink { id: u64, ino: u64 },
+
+	/// Write file content.
+	#[serde(rename = "write")]
+	Write { id: u64, ino: u64, offset: i64, data: String },
+
+	/// Create a file in a directory.
+	#[serde(rename = "create")]
+	Create { id: u64, parent: u64, name: String, mode: u32 },
+
+	/// Create a directory.
+	#[serde(rename = "mkdir")]
+	Mkdir { id: u64, parent: u64, name: String, mode: u32 },
+
+	/// Remove a directory entry.
+	#[serde(rename = "unlink")]
+	Unlink { id: u64, parent: u64, name: String },
+
+	/// Remove a directory.
+	#[serde(rename = "rmdir")]
+	Rmdir { id: u64, parent: u64, name: String },
+
+	/// Rename a directory entry.
+	#[serde(rename = "rename")]
+	Rename { id: u64, parent: u64, name: String, newparent: u64, newname: String },
+
+	/// Create a symbolic link.
+	#[serde(rename = "symlink")]
+	Symlink { id: u64, parent: u64, name: String, target: String },
+
+	/// Truncate or extend a file to a given size.
+	#[serde(rename = "truncate")]
+	Truncate { id: u64, ino: u64, size: u64 },
 }
 
 /// File type as reported by the parent process.
@@ -77,6 +109,9 @@ pub struct Response {
 	/// Symlink target for readlink responses.
 	#[serde(default)]
 	pub target:  Option<String>,
+	/// Number of bytes written for write responses.
+	#[serde(default)]
+	pub written: Option<u32>,
 }
 
 /// Events sent from the bridge to the parent (not expecting a response).
@@ -112,7 +147,15 @@ pub mod io {
 			| Request::GetAttr { id, .. }
 			| Request::ReadDir { id, .. }
 			| Request::Read { id, .. }
-			| Request::ReadLink { id, .. } => *id,
+			| Request::ReadLink { id, .. }
+			| Request::Write { id, .. }
+			| Request::Create { id, .. }
+			| Request::Mkdir { id, .. }
+			| Request::Unlink { id, .. }
+			| Request::Rmdir { id, .. }
+			| Request::Rename { id, .. }
+			| Request::Symlink { id, .. }
+			| Request::Truncate { id, .. } => *id,
 		};
 
 		// Send request

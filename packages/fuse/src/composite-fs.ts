@@ -146,6 +146,78 @@ export function createCompositeFS(mounts: Record<string, VirtualFS>): VirtualFS 
 			return target.entry.fs.readlink?.(target.childIno) ?? null;
 		},
 
+		async write(ino: Ino, offset: number, data: Buffer): Promise<number> {
+			const target = resolve(ino);
+			if (!target) return 0;
+			return (await target.entry.fs.write?.(target.childIno, offset, data)) ?? 0;
+		},
+
+		async truncate(ino: Ino, size: number): Promise<FileAttr | null> {
+			const target = resolve(ino);
+			if (!target?.entry.fs.truncate) return null;
+			const attr = await target.entry.fs.truncate(target.childIno, size);
+			if (!attr) return null;
+			return { ...attr, ino };
+		},
+
+		async create(parent: Ino, name: string, mode: number): Promise<FileAttr | null> {
+			if (parent === ROOT_INO) return null;
+			const target = resolve(parent);
+			if (!target?.entry.fs.create) return null;
+			const attr = await target.entry.fs.create(target.childIno, name, mode);
+			if (!attr) return null;
+			const parentPath = inodes.getPath(parent) ?? "/";
+			const globalIno = inodes.getOrAssign(path.join(parentPath, name));
+			return { ...attr, ino: globalIno };
+		},
+
+		async mkdir(parent: Ino, name: string, mode: number): Promise<FileAttr | null> {
+			if (parent === ROOT_INO) return null;
+			const target = resolve(parent);
+			if (!target?.entry.fs.mkdir) return null;
+			const attr = await target.entry.fs.mkdir(target.childIno, name, mode);
+			if (!attr) return null;
+			const parentPath = inodes.getPath(parent) ?? "/";
+			const globalIno = inodes.getOrAssign(path.join(parentPath, name));
+			return { ...attr, ino: globalIno };
+		},
+
+		async unlink(parent: Ino, name: string): Promise<boolean> {
+			if (parent === ROOT_INO) return false;
+			const target = resolve(parent);
+			if (!target) return false;
+			return (await target.entry.fs.unlink?.(target.childIno, name)) ?? false;
+		},
+
+		async rmdir(parent: Ino, name: string): Promise<boolean> {
+			if (parent === ROOT_INO) return false;
+			const target = resolve(parent);
+			if (!target) return false;
+			return (await target.entry.fs.rmdir?.(target.childIno, name)) ?? false;
+		},
+
+		async rename(parent: Ino, name: string, newparent: Ino, newname: string): Promise<boolean> {
+			const srcTarget = resolve(parent);
+			if (!srcTarget) return false;
+			const dstTarget = resolve(newparent);
+			if (!dstTarget) return false;
+			// Cross-mount rename not supported
+			if (srcTarget.entry !== dstTarget.entry) return false;
+			if (!srcTarget.entry.fs.rename) return false;
+			return srcTarget.entry.fs.rename(srcTarget.childIno, name, dstTarget.childIno, newname);
+		},
+
+		async symlink(parent: Ino, name: string, target: string): Promise<FileAttr | null> {
+			if (parent === ROOT_INO) return null;
+			const resolved = resolve(parent);
+			if (!resolved?.entry.fs.symlink) return null;
+			const attr = await resolved.entry.fs.symlink(resolved.childIno, name, target);
+			if (!attr) return null;
+			const parentPath = inodes.getPath(parent) ?? "/";
+			const globalIno = inodes.getOrAssign(path.join(parentPath, name));
+			return { ...attr, ino: globalIno };
+		},
+
 		async destroy(): Promise<void> {
 			await Promise.all(entries.map(e => e.fs.destroy?.()));
 		},

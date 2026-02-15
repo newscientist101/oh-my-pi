@@ -2,13 +2,15 @@
 
 use std::{
 	ffi::OsStr,
+	path::Path,
 	sync::atomic::{AtomicU64, Ordering},
-	time::Duration,
+	time::{Duration, SystemTime},
 };
 
 use fuser::{
-	Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, KernelConfig, LockOwner,
-	OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
+	BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo,
+	KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyData, ReplyDirectory,
+	ReplyEmpty, ReplyEntry, Request, TimeOrNow,
 };
 use log::debug;
 
@@ -86,6 +88,70 @@ impl Filesystem for BridgeFs {
 		// Signal readiness to parent now that the FUSE mount is established
 		crate::protocol::io::send_event(&crate::protocol::Event::Ready);
 		Ok(())
+	}
+
+	#[allow(clippy::too_many_arguments, reason = "fuser trait requires all these parameters")]
+	fn setattr(
+		&self,
+		_req: &Request,
+		ino: INodeNo,
+		_mode: Option<u32>,
+		_uid: Option<u32>,
+		_gid: Option<u32>,
+		size: Option<u64>,
+		_atime: Option<TimeOrNow>,
+		_mtime: Option<TimeOrNow>,
+		_ctime: Option<SystemTime>,
+		_fh: Option<FileHandle>,
+		_crtime: Option<SystemTime>,
+		_chgtime: Option<SystemTime>,
+		_bkuptime: Option<SystemTime>,
+		_flags: Option<BsdFileFlags>,
+		reply: ReplyAttr,
+	) {
+		if let Some(new_size) = size {
+			debug!("setattr/truncate: ino={}, size={new_size}", ino.0);
+
+			let req = protocol::Request::Truncate { id: next_id(), ino: ino.0, size: new_size };
+
+			match protocol::io::call(&req) {
+				Ok(resp) => {
+					if let Some(e) = resp.error {
+						reply.error(errno(e));
+						return;
+					}
+					if let Some(attr) = resp.attr {
+						reply.attr(&TTL, &to_file_attr(&attr));
+					} else {
+						reply.error(Errno::EIO);
+					}
+				},
+				Err(e) => {
+					log::error!("truncate call failed: {e}");
+					reply.error(Errno::EIO);
+				},
+			}
+		} else {
+			// For non-size setattr, return current attrs
+			let req = protocol::Request::GetAttr { id: next_id(), ino: ino.0 };
+			match protocol::io::call(&req) {
+				Ok(resp) => {
+					if let Some(e) = resp.error {
+						reply.error(errno(e));
+						return;
+					}
+					if let Some(attr) = resp.attr {
+						reply.attr(&TTL, &to_file_attr(&attr));
+					} else {
+						reply.error(Errno::ENOENT);
+					}
+				},
+				Err(e) => {
+					log::error!("setattr/getattr call failed: {e}");
+					reply.error(Errno::EIO);
+				},
+			}
+		}
 	}
 
 	fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
@@ -238,6 +304,235 @@ impl Filesystem for BridgeFs {
 			},
 		}
 	}
+
+	fn write(
+		&self,
+		_req: &Request,
+		ino: INodeNo,
+		_fh: FileHandle,
+		offset: u64,
+		data: &[u8],
+		_write_flags: fuser::WriteFlags,
+		_flags: OpenFlags,
+		_lock_owner: Option<LockOwner>,
+		reply: fuser::ReplyWrite,
+	) {
+		debug!("write: ino={}, offset={offset}, len={}", ino.0, data.len());
+
+		let req = protocol::Request::Write {
+			id:     next_id(),
+			ino:    ino.0,
+			offset: offset as i64,
+			data:   base64_encode(data),
+		};
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+					return;
+				}
+				if let Some(written) = resp.written {
+					reply.written(written);
+				} else {
+					reply.error(Errno::EIO);
+				}
+			},
+			Err(e) => {
+				log::error!("write call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn create(
+		&self,
+		_req: &Request,
+		parent: INodeNo,
+		name: &OsStr,
+		mode: u32,
+		_umask: u32,
+		_flags: i32,
+		reply: fuser::ReplyCreate,
+	) {
+		let name_str = name.to_string_lossy().to_string();
+		debug!("create: parent={}, name={name_str}, mode={mode:#o}", parent.0);
+
+		let req = protocol::Request::Create { id: next_id(), parent: parent.0, name: name_str, mode };
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+					return;
+				}
+				if let Some(attr) = resp.attr {
+					reply.created(
+						&TTL,
+						&to_file_attr(&attr),
+						Generation(0),
+						FileHandle(0),
+						fuser::FopenFlags::empty(),
+					);
+				} else {
+					reply.error(Errno::EIO);
+				}
+			},
+			Err(e) => {
+				log::error!("create call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn mkdir(
+		&self,
+		_req: &Request,
+		parent: INodeNo,
+		name: &OsStr,
+		mode: u32,
+		_umask: u32,
+		reply: ReplyEntry,
+	) {
+		let name_str = name.to_string_lossy().to_string();
+		debug!("mkdir: parent={}, name={name_str}, mode={mode:#o}", parent.0);
+
+		let req = protocol::Request::Mkdir { id: next_id(), parent: parent.0, name: name_str, mode };
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+					return;
+				}
+				if let Some(attr) = resp.attr {
+					reply.entry(&TTL, &to_file_attr(&attr), Generation(0));
+				} else {
+					reply.error(Errno::EIO);
+				}
+			},
+			Err(e) => {
+				log::error!("mkdir call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+		let name_str = name.to_string_lossy().to_string();
+		debug!("unlink: parent={}, name={name_str}", parent.0);
+
+		let req = protocol::Request::Unlink { id: next_id(), parent: parent.0, name: name_str };
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+				} else {
+					reply.ok();
+				}
+			},
+			Err(e) => {
+				log::error!("unlink call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+		let name_str = name.to_string_lossy().to_string();
+		debug!("rmdir: parent={}, name={name_str}", parent.0);
+
+		let req = protocol::Request::Rmdir { id: next_id(), parent: parent.0, name: name_str };
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+				} else {
+					reply.ok();
+				}
+			},
+			Err(e) => {
+				log::error!("rmdir call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn rename(
+		&self,
+		_req: &Request,
+		parent: INodeNo,
+		name: &OsStr,
+		newparent: INodeNo,
+		newname: &OsStr,
+		_flags: RenameFlags,
+		reply: ReplyEmpty,
+	) {
+		let name_str = name.to_string_lossy().to_string();
+		let newname_str = newname.to_string_lossy().to_string();
+		debug!(
+			"rename: parent={}, name={name_str}, newparent={}, newname={newname_str}",
+			parent.0, newparent.0
+		);
+
+		let req = protocol::Request::Rename {
+			id:        next_id(),
+			parent:    parent.0,
+			name:      name_str,
+			newparent: newparent.0,
+			newname:   newname_str,
+		};
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+				} else {
+					reply.ok();
+				}
+			},
+			Err(e) => {
+				log::error!("rename call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
+
+	fn symlink(
+		&self,
+		_req: &Request,
+		parent: INodeNo,
+		link_name: &OsStr,
+		target: &Path,
+		reply: ReplyEntry,
+	) {
+		let name = link_name.to_string_lossy().to_string();
+		let target_str = target.to_string_lossy().to_string();
+		debug!("symlink: parent={}, name={name}, target={target_str}", parent.0);
+
+		let req =
+			protocol::Request::Symlink { id: next_id(), parent: parent.0, name, target: target_str };
+
+		match protocol::io::call(&req) {
+			Ok(resp) => {
+				if let Some(e) = resp.error {
+					reply.error(errno(e));
+					return;
+				}
+				if let Some(attr) = resp.attr {
+					reply.entry(&TTL, &to_file_attr(&attr), Generation(0));
+				} else {
+					reply.error(Errno::EIO);
+				}
+			},
+			Err(e) => {
+				log::error!("symlink call failed: {e}");
+				reply.error(Errno::EIO);
+			},
+		}
+	}
 }
 
 /// Simple base64 decoder (avoids adding a dependency).
@@ -282,4 +577,40 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 	}
 
 	Ok(out)
+}
+
+/// Simple base64 encoder (avoids adding a dependency).
+fn base64_encode(input: &[u8]) -> String {
+	const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+	let mut pos = 0;
+
+	while pos + 2 < input.len() {
+		let a = input[pos];
+		let b = input[pos + 1];
+		let c = input[pos + 2];
+		out.push(TABLE[(a >> 2) as usize] as char);
+		out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+		out.push(TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+		out.push(TABLE[(c & 0x3f) as usize] as char);
+		pos += 3;
+	}
+
+	let remaining = input.len() - pos;
+	if remaining == 1 {
+		let a = input[pos];
+		out.push(TABLE[(a >> 2) as usize] as char);
+		out.push(TABLE[((a & 0x03) << 4) as usize] as char);
+		out.push('=');
+		out.push('=');
+	} else if remaining == 2 {
+		let a = input[pos];
+		let b = input[pos + 1];
+		out.push(TABLE[(a >> 2) as usize] as char);
+		out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+		out.push(TABLE[((b & 0x0f) << 2) as usize] as char);
+		out.push('=');
+	}
+
+	out
 }

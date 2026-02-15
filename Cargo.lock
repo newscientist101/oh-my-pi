@@ -2178,6 +2178,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-fuse2"
+version = "12.5.1"
+dependencies = [
+ "env_logger",
+ "fuser",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pi-natives"
 version = "12.5.1"
 dependencies = [

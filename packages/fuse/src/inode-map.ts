@@ -33,6 +33,13 @@ export class InodeMap {
 		return ino;
 	}
 
+	/** Assign a specific inode number to a path (used for renames). */
+	assign(path: string, ino: Ino): void {
+		const normalized = normalizePath(path);
+		this.#pathToIno.set(normalized, ino);
+		this.#inoToPath.set(ino, normalized);
+	}
+
 	/** Look up an inode by path. Returns undefined if not mapped. */
 	getIno(path: string): Ino | undefined {
 		return this.#pathToIno.get(normalizePath(path));

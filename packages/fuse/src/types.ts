@@ -51,7 +51,15 @@ export type FuseRequest =
 	| { op: "getattr"; id: number; ino: Ino }
 	| { op: "readdir"; id: number; ino: Ino; offset: number }
 	| { op: "read"; id: number; ino: Ino; offset: number; size: number }
-	| { op: "readlink"; id: number; ino: Ino };
+	| { op: "readlink"; id: number; ino: Ino }
+	| { op: "write"; id: number; ino: Ino; offset: number; data: string }
+	| { op: "create"; id: number; parent: Ino; name: string; mode: number }
+	| { op: "mkdir"; id: number; parent: Ino; name: string; mode: number }
+	| { op: "unlink"; id: number; parent: Ino; name: string }
+	| { op: "rmdir"; id: number; parent: Ino; name: string }
+	| { op: "rename"; id: number; parent: Ino; name: string; newparent: Ino; newname: string }
+	| { op: "symlink"; id: number; parent: Ino; name: string; target: string }
+	| { op: "truncate"; id: number; ino: Ino; size: number };
 
 /** Response sent back to the FUSE bridge. */
 export interface FuseResponse {
@@ -63,6 +71,8 @@ export interface FuseResponse {
 	data?: string | null;
 	/** Symlink target path. */
 	target?: string | null;
+	/** Number of bytes written. */
+	written?: number | null;
 }
 
 /** Event from the FUSE bridge (no response expected). */
@@ -120,6 +130,54 @@ export interface VirtualFS {
 	 * Return null if the inode is not a symlink.
 	 */
 	readlink?(ino: Ino): Promise<string | null>;
+
+	/**
+	 * Write data to a file at the given offset.
+	 * Return the number of bytes written.
+	 */
+	write?(ino: Ino, offset: number, data: Buffer): Promise<number>;
+
+	/**
+	 * Create a new file in the given parent directory.
+	 * Return the attributes of the created file, or null on failure.
+	 */
+	create?(parent: Ino, name: string, mode: number): Promise<FileAttr | null>;
+
+	/**
+	 * Create a directory.
+	 * Return the new directory's attributes, or null on failure.
+	 */
+	mkdir?(parent: Ino, name: string, mode: number): Promise<FileAttr | null>;
+
+	/**
+	 * Remove a directory entry (file or symlink).
+	 * Return true if removed, false if not found.
+	 */
+	unlink?(parent: Ino, name: string): Promise<boolean>;
+
+	/**
+	 * Remove an empty directory.
+	 * Return true on success, false if not found or not empty.
+	 */
+	rmdir?(parent: Ino, name: string): Promise<boolean>;
+
+	/**
+	 * Rename/move a directory entry.
+	 * Return true on success, false if the source doesn't exist.
+	 */
+	rename?(parent: Ino, name: string, newparent: Ino, newname: string): Promise<boolean>;
+
+	/**
+	 * Create a symbolic link.
+	 * Return the attrs of the created symlink, or null on failure.
+	 */
+	symlink?(parent: Ino, name: string, target: string): Promise<FileAttr | null>;
+
+	/**
+	 * Truncate or extend a file to the given size.
+	 * Return updated attributes, or null on failure.
+	 */
+	truncate?(ino: Ino, size: number): Promise<FileAttr | null>;
 
 	/**
 	 * Called when the filesystem is being unmounted.

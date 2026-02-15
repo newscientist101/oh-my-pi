@@ -13,8 +13,9 @@ import type { FuseEvent, FuseRequest, FuseResponse, VirtualFS } from "./types";
 
 // POSIX errno constants
 const ENOENT = 2;
-const ENOSYS = 38;
 const EIO = 5;
+const ENOSYS = 38;
+const ENOTEMPTY = 39;
 
 export interface MountOptions {
 	/** Path to the pi-fuse binary. Defaults to searching workspace then PATH. */
@@ -206,6 +207,62 @@ async function dispatch(vfs: VirtualFS, req: FuseRequest): Promise<FuseResponse>
 			const target = await vfs.readlink(req.ino);
 			if (!target) return { id: req.id, error: ENOENT };
 			return { id: req.id, target };
+		}
+
+		case "write": {
+			if (!vfs.write) return { id: req.id, error: ENOSYS };
+			const buf = Buffer.from(req.data, "base64");
+			const written = await vfs.write(req.ino, req.offset, buf);
+			return { id: req.id, written };
+		}
+
+		case "create": {
+			if (!vfs.create) return { id: req.id, error: ENOSYS };
+			const createAttr = await vfs.create(req.parent, req.name, req.mode);
+			if (!createAttr) return { id: req.id, error: EIO };
+			return { id: req.id, attr: createAttr };
+		}
+
+		case "mkdir": {
+			if (!vfs.mkdir) return { id: req.id, error: ENOSYS };
+			const mkdirAttr = await vfs.mkdir(req.parent, req.name, req.mode);
+			if (!mkdirAttr) return { id: req.id, error: EIO };
+			return { id: req.id, attr: mkdirAttr };
+		}
+
+		case "unlink": {
+			if (!vfs.unlink) return { id: req.id, error: ENOSYS };
+			const unlinkOk = await vfs.unlink(req.parent, req.name);
+			if (!unlinkOk) return { id: req.id, error: ENOENT };
+			return { id: req.id };
+		}
+
+		case "rmdir": {
+			if (!vfs.rmdir) return { id: req.id, error: ENOSYS };
+			const rmdirOk = await vfs.rmdir(req.parent, req.name);
+			if (!rmdirOk) return { id: req.id, error: ENOTEMPTY };
+			return { id: req.id };
+		}
+
+		case "rename": {
+			if (!vfs.rename) return { id: req.id, error: ENOSYS };
+			const renameOk = await vfs.rename(req.parent, req.name, req.newparent, req.newname);
+			if (!renameOk) return { id: req.id, error: ENOENT };
+			return { id: req.id };
+		}
+
+		case "symlink": {
+			if (!vfs.symlink) return { id: req.id, error: ENOSYS };
+			const symlinkAttr = await vfs.symlink(req.parent, req.name, req.target);
+			if (!symlinkAttr) return { id: req.id, error: EIO };
+			return { id: req.id, attr: symlinkAttr };
+		}
+
+		case "truncate": {
+			if (!vfs.truncate) return { id: req.id, error: ENOSYS };
+			const truncAttr = await vfs.truncate(req.ino, req.size);
+			if (!truncAttr) return { id: req.id, error: ENOENT };
+			return { id: req.id, attr: truncAttr };
 		}
 
 		default: {
