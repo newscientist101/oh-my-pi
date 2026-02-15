@@ -9,7 +9,6 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import type { UserMessage } from "@oh-my-pi/pi-ai";
 
 describe("RLM compaction behavior", () => {
 	it("startRlm disables auto-compaction and stores previous setting", () => {
@@ -363,7 +362,7 @@ describe("RLM batch summarization", () => {
 	});
 
 	it("handles JSON context correctly", () => {
-		const context = { users: [{ name: "Alice" }, { name: "Bob" }] };
+		const context: unknown = { users: [{ name: "Alice" }, { name: "Bob" }] };
 		const contextType = typeof context === "string" ? "text" : "JSON";
 		const contextLength = typeof context === "string" ? context.length : JSON.stringify(context).length;
 
