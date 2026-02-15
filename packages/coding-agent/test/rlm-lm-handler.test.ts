@@ -334,6 +334,185 @@ describe("LMHandler", () => {
 				customHandler.stop();
 			}
 		});
+
+		it("limits concurrency to prevent rate limiting", async () => {
+			// Track concurrent executions
+			let maxConcurrent = 0;
+			let currentConcurrent = 0;
+			const { promise: allStarted, resolve: resolveAllStarted } = Promise.withResolvers<void>();
+			let started = 0;
+
+			// Create a custom stream function that tracks concurrency
+			const customStreamFn: StreamFn = model => {
+				currentConcurrent++;
+				started++;
+				maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+
+				// Signal when all prompts have started (to verify limit)
+				if (started === LMHandler.BATCH_CONCURRENCY) {
+					resolveAllStarted();
+				}
+
+				const stream = new EventStream<{ type: "message_complete"; message: AssistantMessage }, AssistantMessage>(
+					event => event.type === "message_complete",
+					event => event.message,
+				);
+
+				// Override result() to include delay and track concurrency
+				const originalResult = stream.result.bind(stream);
+				stream.result = async () => {
+					await Bun.sleep(10);
+					currentConcurrent--;
+					return originalResult();
+				};
+
+				// Push response async
+				setTimeout(() => {
+					stream.push({
+						type: "message_complete",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "response" }],
+							api: "anthropic-messages",
+							provider: "anthropic",
+							model: model.id,
+							usage: {
+								input: 10,
+								output: 5,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 15,
+								cost: { total: 0.001, input: 0.0005, output: 0.0005, cacheRead: 0, cacheWrite: 0 },
+							},
+							stopReason: "stop",
+							timestamp: Date.now(),
+						},
+					});
+				}, 0);
+
+				return stream as unknown as ReturnType<StreamFn>;
+			};
+
+			const deps: LMHandlerDeps = {
+				getModel: () => createMockModel(),
+				getApiKey: async () => "test-key",
+				streamFn: customStreamFn,
+			};
+			const customHandler = new LMHandler(deps);
+			customHandler.start();
+
+			try {
+				// Send more prompts than the concurrency limit
+				const numPrompts = LMHandler.BATCH_CONCURRENCY * 2;
+				const prompts = Array.from({ length: numPrompts }, (_, i) => `prompt${i}`);
+
+				const responsePromise = fetch(customHandler.url, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${customHandler.token}`,
+					},
+					body: JSON.stringify({ prompts, batched: true }),
+				});
+
+				// Wait for the concurrency limit to be reached
+				await allStarted;
+
+				// At this point, maxConcurrent should equal BATCH_CONCURRENCY, not numPrompts
+				expect(maxConcurrent).toBeLessThanOrEqual(LMHandler.BATCH_CONCURRENCY);
+
+				// Complete the request
+				const response = await responsePromise;
+				expect(response.status).toBe(200);
+
+				const body = (await response.json()) as LMHandlerResponse;
+				expect(body.contents).toHaveLength(numPrompts);
+
+				// Verify max concurrency was respected throughout
+				expect(maxConcurrent).toBe(LMHandler.BATCH_CONCURRENCY);
+			} finally {
+				customHandler.stop();
+			}
+		});
+
+		it("preserves order of results with concurrency limiting", async () => {
+			// Use varying response times to verify order is preserved
+			const delays = [50, 10, 30, 20, 40]; // Deliberately non-sequential
+			let callIndex = 0;
+
+			const customStreamFn: StreamFn = model => {
+				const myIndex = callIndex++;
+				const delay = delays[myIndex % delays.length];
+
+				const stream = new EventStream<{ type: "message_complete"; message: AssistantMessage }, AssistantMessage>(
+					event => event.type === "message_complete",
+					event => event.message,
+				);
+
+				// Override result() to include varying delays
+				const originalResult = stream.result.bind(stream);
+				stream.result = async () => {
+					await Bun.sleep(delay);
+					return originalResult();
+				};
+
+				// Push response async
+				setTimeout(() => {
+					stream.push({
+						type: "message_complete",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: `response-${myIndex}` }],
+							api: "anthropic-messages",
+							provider: "anthropic",
+							model: model.id,
+							usage: {
+								input: 10,
+								output: 5,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 15,
+								cost: { total: 0.001, input: 0.0005, output: 0.0005, cacheRead: 0, cacheWrite: 0 },
+							},
+							stopReason: "stop",
+							timestamp: Date.now(),
+						},
+					});
+				}, 0);
+
+				return stream as unknown as ReturnType<StreamFn>;
+			};
+
+			const deps: LMHandlerDeps = {
+				getModel: () => createMockModel(),
+				getApiKey: async () => "test-key",
+				streamFn: customStreamFn,
+			};
+			const customHandler = new LMHandler(deps);
+			customHandler.start();
+
+			try {
+				const response = await fetch(customHandler.url, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${customHandler.token}`,
+					},
+					body: JSON.stringify({
+						prompts: ["p0", "p1", "p2", "p3", "p4"],
+						batched: true,
+					}),
+				});
+
+				expect(response.status).toBe(200);
+				const body = (await response.json()) as LMHandlerResponse;
+
+				// Results should be in order regardless of completion time
+				expect(body.contents).toEqual(["response-0", "response-1", "response-2", "response-3", "response-4"]);
+			} finally {
+				customHandler.stop();
+			}
+		});
 	});
 
 	describe("error handling", () => {

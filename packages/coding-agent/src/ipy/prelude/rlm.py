@@ -156,12 +156,13 @@ def llm_query(prompt: str, model: str | None = None) -> str:
 
 
 def llm_query_batched(prompts: list[str], model: str | None = None) -> list[str]:
-    """Query a sub-LLM with multiple prompts in parallel.
+    """Query a sub-LLM with multiple prompts in parallel with concurrency limits.
 
     More efficient than multiple sequential llm_query() calls when you have
     independent prompts that don't depend on each other's results.
 
-    Note: Server may apply concurrency limits to prevent rate limiting.
+    The server applies concurrency limits (currently 3 parallel requests) to
+    prevent rate limiting while still providing parallelism benefit.
 
     Args:
         prompts: List of prompts to send

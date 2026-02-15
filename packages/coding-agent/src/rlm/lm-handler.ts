@@ -4,6 +4,12 @@
  * Provides a local HTTP endpoint that the Python REPL can call to make
  * sub-LLM queries during RLM iterations. Uses session token auth.
  *
+ * ## Batched Requests
+ *
+ * The batched endpoint (`batched: true`) processes multiple prompts with
+ * concurrency limits (currently 3 parallel requests) to prevent rate limiting
+ * while still providing parallelism benefits over sequential calls.
+ *
  * ## Security Model
  *
  * **Token Scope & Lifetime:**
@@ -213,14 +219,51 @@ export class LMHandler {
 		return { content };
 	}
 
+	/**
+	 * Maximum concurrent sub-LLM requests in batched mode.
+	 * Set to 3 to avoid rate limiting while still providing parallelism.
+	 */
+	static readonly BATCH_CONCURRENCY = 3;
+
 	async #handleBatched(request: BatchedRequest, signal?: AbortSignal): Promise<{ contents: string[] }> {
-		// NOTE: This is a simple parallel implementation, not true batching.
-		// TODO: Add concurrency limits or true provider batch support.
-		const results = await Promise.all(
-			request.prompts.map(prompt =>
-				this.#handleSingle({ prompt, model: request.model, depth: request.depth }, signal),
-			),
-		);
+		const concurrency = LMHandler.BATCH_CONCURRENCY;
+		const prompts = request.prompts;
+		const results: { content: string }[] = new Array(prompts.length);
+
+		// Process prompts in concurrent batches with a semaphore pattern
+		let active = 0;
+		let nextIndex = 0;
+
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+
+		const startNext = (): void => {
+			while (active < concurrency && nextIndex < prompts.length) {
+				const index = nextIndex++;
+				active++;
+
+				this.#handleSingle({ prompt: prompts[index], model: request.model, depth: request.depth }, signal)
+					.then(result => {
+						results[index] = result;
+						active--;
+
+						if (nextIndex >= prompts.length && active === 0) {
+							resolve();
+						} else {
+							startNext();
+						}
+					})
+					.catch(err => {
+						reject(err);
+					});
+			}
+		};
+
+		// Start initial batch of concurrent requests
+		startNext();
+
+		// Wait for all to complete (or first error)
+		await promise;
+
 		return { contents: results.map(r => r.content) };
 	}
 
