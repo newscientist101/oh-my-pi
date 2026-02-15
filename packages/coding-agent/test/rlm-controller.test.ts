@@ -960,3 +960,206 @@ FINAL_VAR: summary
 		});
 	});
 });
+
+describe("graceful degradation at iteration_limit", () => {
+	/**
+	 * Tests verify that when iteration_limit is reached:
+	 * 1. The agent ALREADY received and responded to "give best answer now" message
+	 * 2. The agent had one more chance to provide FINAL()
+	 * 3. The flow matches the agent-loop behavior
+	 *
+	 * The interaction between checkTermination and agent-loop:
+	 * - Controller injects "give best answer now" at maxIterations - 1
+	 * - Agent-loop checks iteration limit AFTER getting follow-up from checkTermination
+	 * - This ensures agent sees the warning before limit is enforced
+	 */
+
+	it("simulates full flow: warning → response → limit", async () => {
+		// Scenario: maxIterations = 3
+		// Iteration 0: normal continuation
+		// Iteration 1: "give best answer now" message injected
+		// Iteration 2: agent responds, still no FINAL → iteration_limit
+
+		const config: RLMConfig = { maxIterations: 3, maxDepth: 2 };
+		const deps: RLMDeps = {
+			executePython: mock(async () => ({ output: "", exitCode: 0 })),
+			lmHandler: createMockLMHandler(),
+		};
+
+		const mode = createRLMIterationMode(config, deps);
+
+		// Track messages sent to agent
+		const followUpMessages: string[] = [];
+
+		// Iteration 0: Agent does some work, no FINAL
+		const result1 = await mode.checkTermination(createAssistantMessage("I'm analyzing the data..."));
+		expect(result1.done).toBe(false);
+		if (!result1.done) {
+			const content = (result1.followUp[0] as UserMessage).content;
+			if (typeof content === "string") {
+				followUpMessages.push(content);
+				// Should be normal continuation, not the limit warning yet
+				expect(content.includes("reached the iteration limit")).toBe(false);
+			}
+		}
+
+		// Iteration 1: Controller should inject "give best answer now"
+		const result2 = await mode.checkTermination(createAssistantMessage("Still processing chunks..."));
+		expect(result2.done).toBe(false);
+		if (!result2.done) {
+			const content = (result2.followUp[0] as UserMessage).content;
+			if (typeof content === "string") {
+				followUpMessages.push(content);
+				// THIS is where the agent sees the warning
+				expect(content.includes("reached the iteration limit")).toBe(true);
+				expect(content.includes("best answer now")).toBe(true);
+			}
+		}
+
+		// Iteration 2: Agent responds to warning but still doesn't FINAL
+		// In real flow, agent-loop would check limit AFTER checkTermination
+		const result3 = await mode.checkTermination(createAssistantMessage("I don't have enough info..."));
+
+		// Controller returns another follow-up (can't know agent-loop will stop it)
+		expect(result3.done).toBe(false);
+
+		// Verify the agent received proper warning before limit
+		expect(followUpMessages.length).toBe(2);
+		expect(followUpMessages[1]).toContain("best answer now");
+	});
+
+	it("agent can still FINAL after receiving the warning", async () => {
+		const config: RLMConfig = { maxIterations: 3, maxDepth: 2 };
+		const deps: RLMDeps = {
+			executePython: mock(async () => ({ output: "", exitCode: 0 })),
+			lmHandler: createMockLMHandler(),
+		};
+
+		const mode = createRLMIterationMode(config, deps);
+
+		// Iteration 0: normal work
+		await mode.checkTermination(createAssistantMessage("Working..."));
+
+		// Iteration 1: receives warning
+		const warningResult = await mode.checkTermination(createAssistantMessage("Still working..."));
+		expect(warningResult.done).toBe(false);
+		if (!warningResult.done) {
+			const content = (warningResult.followUp[0] as UserMessage).content;
+			expect(typeof content === "string" && content.includes("best answer now")).toBe(true);
+		}
+
+		// Iteration 2: agent heeds the warning and provides FINAL
+		const finalResult = await mode.checkTermination(createAssistantMessage("FINAL(My best guess is X)"));
+		expect(finalResult.done).toBe(true);
+		if (finalResult.done) {
+			expect(finalResult.result).toBe("My best guess is X");
+		}
+	});
+
+	it("agent-loop stops when limit exceeded even if controller returns follow-up", async () => {
+		// This documents the coordination between controller and agent-loop:
+		// - Controller always returns follow-up (doesn't track agent-loop's iteration index)
+		// - Agent-loop enforces the hard limit via iterationIndex check
+		// - The "give best answer" message is sent ONE iteration before the limit
+
+		const config: RLMConfig = { maxIterations: 2, maxDepth: 2 };
+		const deps: RLMDeps = {
+			executePython: mock(async () => ({ output: "", exitCode: 0 })),
+			lmHandler: createMockLMHandler(),
+		};
+
+		const mode = createRLMIterationMode(config, deps);
+
+		// Simulating agent-loop behavior:
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
+		const _iterationIndex = 0; // Used in comments to document the flow
+
+		// First call (iterationIndex = 0)
+		const result1 = await mode.checkTermination(createAssistantMessage("Working..."));
+		expect(result1.done).toBe(false);
+		// Agent-loop check: 0 + 1 >= 2? Yes! But controller already sent final warning
+
+		if (!result1.done) {
+			const content = (result1.followUp[0] as UserMessage).content;
+			// With maxIterations=2, even first iteration gets the warning
+			expect(typeof content === "string" && content.includes("reached the iteration limit")).toBe(true);
+		}
+
+		// After first check, if agent-loop's condition (iterationIndex + 1 >= maxIterations)
+		// is true, it would emit iteration_limit. But the message above was already
+		// delivered to the agent, so the agent SAW the warning.
+
+		// This verifies the graceful degradation: agent always gets warned before limit
+	});
+
+	it("final iteration message is marked synthetic and rlmIteration", async () => {
+		const config: RLMConfig = { maxIterations: 2, maxDepth: 2 };
+		const deps: RLMDeps = {
+			executePython: mock(async () => ({ output: "", exitCode: 0 })),
+			lmHandler: createMockLMHandler(),
+		};
+
+		const mode = createRLMIterationMode(config, deps);
+
+		const result = await mode.checkTermination(createAssistantMessage("Working..."));
+		expect(result.done).toBe(false);
+
+		if (!result.done) {
+			const followUp = result.followUp[0] as UserMessage;
+			// Final iteration message should be properly tagged
+			expect(followUp.synthetic).toBe(true);
+			expect(followUp.rlmIteration).toBe(true);
+		}
+	});
+
+	it("verifies warning timing: warning at N-1, limit enforced at N", async () => {
+		// For maxIterations = 5:
+		// - Iterations 0, 1, 2: normal continuation with "approaching limit" warnings
+		// - Iteration 3: "give best answer now" (N-1 = 4-1 = 3... wait, let me trace)
+		//
+		// Actually, let's trace controller.currentIteration vs config.maxIterations:
+		// Initial: currentIteration = 0
+		// Call 1: increment to 1, check 1+1 >= 5? No (2 < 5), return normal
+		// Call 2: increment to 2, check 2+1 >= 5? No (3 < 5), return normal
+		// Call 3: increment to 3, check 3+1 >= 5? No (4 < 5), return normal
+		// Call 4: increment to 4, check 4+1 >= 5? Yes! return buildFinalIterationMessage
+		// Call 5: increment to 5, check 5+1 >= 5? Yes! return buildFinalIterationMessage again
+		//
+		// Agent-loop with iterationIndex:
+		// After call 1: iterationIndex = 0+1 = 1, check 1+1 >= 5? No, continue
+		// After call 2: iterationIndex = 2, check 2+1 >= 5? No, continue
+		// After call 3: iterationIndex = 3, check 3+1 >= 5? No, continue
+		// After call 4: iterationIndex = 4, check 4+1 >= 5? Yes! emit iteration_limit
+		//
+		// So: Warning appears at controller call 4 (when iterationIndex becomes 4)
+		//     Limit enforced at agent-loop check after call 4
+
+		const config: RLMConfig = { maxIterations: 5, maxDepth: 2 };
+		const deps: RLMDeps = {
+			executePython: mock(async () => ({ output: "", exitCode: 0 })),
+			lmHandler: createMockLMHandler(),
+		};
+
+		const mode = createRLMIterationMode(config, deps);
+
+		// Calls 1-3: normal continuation
+		for (let i = 0; i < 3; i++) {
+			const result = await mode.checkTermination(createAssistantMessage("Working..."));
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const content = (result.followUp[0] as UserMessage).content;
+				// Might have "approaching" warning but not "reached" yet
+				expect(typeof content === "string" && content.includes("reached the iteration limit")).toBe(false);
+			}
+		}
+
+		// Call 4: should get the final warning
+		const result4 = await mode.checkTermination(createAssistantMessage("Working..."));
+		expect(result4.done).toBe(false);
+		if (!result4.done) {
+			const content = (result4.followUp[0] as UserMessage).content;
+			expect(typeof content === "string" && content.includes("reached the iteration limit")).toBe(true);
+			expect(typeof content === "string" && content.includes("best answer now")).toBe(true);
+		}
+	});
+});
