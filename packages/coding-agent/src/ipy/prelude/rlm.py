@@ -84,6 +84,9 @@ def _lm_request(payload: dict[str, _Any]) -> dict[str, _Any]:
         )
     except _urllib_error.URLError as e:
         raise RuntimeError(f"LLM handler unreachable: {e.reason}")
+    except TimeoutError:
+        # Socket timeout - urlopen timed out waiting for response
+        raise RuntimeError(f"LLM query timed out after {_TIMEOUT} seconds")
 
     # Check for error in successful response (shouldn't happen, but defensive)
     if "error" in result:

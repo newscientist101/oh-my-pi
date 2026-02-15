@@ -392,6 +392,62 @@ print(f'default_timeout: {_TIMEOUT}')
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout.toString()).toContain("default_timeout: 300");
 		});
+
+		it("urlopen timeout prevents indefinite hang with unresponsive server", async () => {
+			// Create a "black hole" server that accepts connections but never responds
+			// This simulates a server that hangs indefinitely - the timeout should prevent
+			// the client from waiting forever
+			const blackHoleServer = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: async () => {
+					// Never resolve - simulate a hanging server
+					await new Promise(() => {});
+					return new Response("never reached");
+				},
+			});
+
+			try {
+				const preludePath = path.join(tempDir, "rlm_prelude.py");
+				await Bun.write(preludePath, RLM_PRELUDE);
+
+				// Use a short timeout (2 seconds) so test completes quickly
+				const timeoutSec = 2;
+
+				const pythonCode = `
+import sys
+import time
+sys.path.insert(0, '${tempDir}')
+from rlm_prelude import _configure, llm_query
+
+# Configure with short timeout against the black hole server
+_configure('http://127.0.0.1:${blackHoleServer.port}', 'test-token', depth=0, timeout=${timeoutSec})
+
+start = time.time()
+try:
+    llm_query('test prompt')
+    print('ERROR: should have timed out')
+except RuntimeError as e:
+    elapsed = time.time() - start
+    error_msg = str(e).lower()
+    # Should fail due to timeout, not immediately
+    # Allow some tolerance: should take at least 1.5s but less than 10s
+    timed_out_correctly = 1.5 < elapsed < 10
+    print(f'elapsed: {elapsed:.2f}')
+    print(f'timed_out_correctly: {timed_out_correctly}')
+    # The error should indicate a timeout or connection issue
+    print(f'is_timeout_error: {"timed out" in error_msg or "timeout" in error_msg or "unreachable" in error_msg}')
+`;
+				const result = await $`python3 -c ${pythonCode}`.quiet().nothrow();
+
+				expect(result.exitCode).toBe(0);
+				const stdout = result.stdout.toString();
+				expect(stdout).toContain("timed_out_correctly: True");
+				expect(stdout).toContain("is_timeout_error: True");
+			} finally {
+				blackHoleServer.stop();
+			}
+		});
 	});
 
 	describe("End-to-end abort scenarios", () => {
