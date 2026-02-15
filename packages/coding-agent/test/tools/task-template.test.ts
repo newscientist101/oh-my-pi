@@ -52,4 +52,33 @@ describe("renderTemplate", () => {
 		});
 		expect(result.skills).toEqual(["react", "postgres"]);
 	});
+
+	test("passes through cwd", () => {
+		const result = renderTemplate(undefined, {
+			id: "X",
+			description: "label",
+			assignment: "do stuff",
+			cwd: "/tmp/other-repo",
+		});
+		expect(result.cwd).toBe("/tmp/other-repo");
+	});
+
+	test("passes through cwd with context", () => {
+		const result = renderTemplate("shared context", {
+			id: "X",
+			description: "label",
+			assignment: "do stuff",
+			cwd: "/tmp/other-repo",
+		});
+		expect(result.cwd).toBe("/tmp/other-repo");
+	});
+
+	test("cwd is undefined when not specified", () => {
+		const result = renderTemplate(undefined, {
+			id: "X",
+			description: "label",
+			assignment: "do stuff",
+		});
+		expect(result.cwd).toBeUndefined();
+	});
 });
