@@ -190,6 +190,24 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			};
 		}
 
+		// Validate cwd + isolated incompatibility
+		const hasPerTaskCwd = params.tasks.some(t => t.cwd);
+		if (isIsolated && hasPerTaskCwd) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: "Per-task cwd is incompatible with isolated mode. Isolated tasks use git worktrees from the parent repo. Remove cwd from tasks or disable isolation.",
+					},
+				],
+				details: {
+					projectAgentsDir,
+					results: [],
+					totalDurationMs: 0,
+				},
+			};
+		}
+
 		// Validate agent exists
 		const agent = getAgent(agents, agentName);
 		if (!agent) {
@@ -468,9 +486,10 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			emitProgress();
 
 			const runTask = async (task: (typeof tasksWithSkills)[number], index: number) => {
+				const effectiveCwd = task.cwd ?? this.session.cwd;
 				if (!isIsolated) {
 					return runSubprocess({
-						cwd: this.session.cwd,
+						cwd: effectiveCwd,
 						agent,
 						task: task.task,
 						description: task.description,

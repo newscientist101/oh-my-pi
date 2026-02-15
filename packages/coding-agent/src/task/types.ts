@@ -48,6 +48,12 @@ export const taskItemSchema = Type.Object({
 			description: "Skill names to preload into the subagent. Use only where it changes correctness.",
 		}),
 	),
+	cwd: Type.Optional(
+		Type.String({
+			description:
+				"Working directory for this task. Defaults to the parent session's cwd. Use to point the subagent at a different repository. Incompatible with isolated mode.",
+		}),
+	),
 });
 export type TaskItem = Static<typeof taskItemSchema>;
 
