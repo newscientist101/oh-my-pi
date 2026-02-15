@@ -29,6 +29,13 @@ import { type DirEntry, type FileAttr, type Ino, ROOT_INO, type VirtualFS } from
 // Types
 // =============================================================================
 
+/** A hierarchical ref tree node. Leaf nodes have a gitRef, intermediates are just containers. */
+interface RefTreeNode {
+	children: Map<string, RefTreeNode>;
+	/** The full git ref (e.g., "refs/heads/feature/auth"). Only set on leaf nodes. */
+	gitRef: string | null;
+}
+
 interface TreeEntry {
 	mode: string;
 	type: "blob" | "tree" | "commit";
@@ -80,6 +87,9 @@ export class GitFS implements VirtualFS {
 	#blobCache = new Map<string, Buffer>();
 	static readonly MAX_BLOB_CACHE = 256;
 
+	/** Cache: git blob SHA -> size in bytes. Cheap to query via `cat-file -s`. */
+	#blobSizeCache = new Map<string, number>();
+
 	/** Cache: ref name -> resolved commit SHA. Cleared on refresh. */
 	#refCache = new Map<string, string>();
 
@@ -121,14 +131,18 @@ export class GitFS implements VirtualFS {
 			return this.#resolveHead();
 		}
 
-		// /branches/<name> — lazily resolve branch ref
-		if (parentPath === "/branches") {
-			return this.#resolveRef(childPath, `refs/heads/${name}`);
+		// /branches/... or /tags/... — hierarchical ref lookup,
+		// BUT only if the parent is still in the ref namespace (no git tree SHA).
+		// Once a ref is resolved, deeper paths go through git tree resolution below.
+		const parentNode = this.#nodes.get(parent);
+		const parentIsRefLevel = !parentNode?.sha;
+
+		if (parentIsRefLevel && (parentPath === "/branches" || parentPath.startsWith("/branches/"))) {
+			return this.#lookupRefPath(childPath, "refs/heads/", "/branches");
 		}
 
-		// /tags/<name> — lazily resolve tag ref
-		if (parentPath === "/tags") {
-			return this.#resolveRef(childPath, `refs/tags/${name}`);
+		if (parentIsRefLevel && (parentPath === "/tags" || parentPath.startsWith("/tags/"))) {
+			return this.#lookupRefPath(childPath, "refs/tags/", "/tags");
 		}
 
 		// /commits/<sha> — resolve by commit SHA
@@ -180,34 +194,14 @@ export class GitFS implements VirtualFS {
 			return entries.slice(offset);
 		}
 
-		// /branches — list all branches
-		if (dirPath === "/branches") {
-			const branches = await this.#listRefs("refs/heads/");
-			const entries: DirEntry[] = [...dotEntries];
-			for (const name of branches) {
-				const branchPath = `/branches/${name}`;
-				const branchIno = this.#inodes.getOrAssign(branchPath);
-				if (!this.#nodes.has(branchIno)) {
-					this.#nodes.set(branchIno, VIRTUAL_DIR);
-				}
-				entries.push({ name, ino: branchIno, kind: "directory" });
-			}
-			return entries.slice(offset);
+		// /branches or /branches/feature (intermediate) — list refs hierarchically
+		if (dirPath === "/branches" || dirPath.startsWith("/branches/")) {
+			return this.#readdirRefLevel(dirPath, "refs/heads/", "/branches", dotEntries, offset);
 		}
 
-		// /tags — list all tags
-		if (dirPath === "/tags") {
-			const tags = await this.#listRefs("refs/tags/");
-			const entries: DirEntry[] = [...dotEntries];
-			for (const name of tags) {
-				const tagPath = `/tags/${name}`;
-				const tagIno = this.#inodes.getOrAssign(tagPath);
-				if (!this.#nodes.has(tagIno)) {
-					this.#nodes.set(tagIno, VIRTUAL_DIR);
-				}
-				entries.push({ name, ino: tagIno, kind: "directory" });
-			}
-			return entries.slice(offset);
+		// /tags or /tags/release (intermediate)
+		if (dirPath === "/tags" || dirPath.startsWith("/tags/")) {
+			return this.#readdirRefLevel(dirPath, "refs/tags/", "/tags", dotEntries, offset);
 		}
 
 		// /commits — virtual: no enumeration
@@ -319,6 +313,26 @@ export class GitFS implements VirtualFS {
 		return entries;
 	}
 
+	/** Get blob size without reading content. Cached. */
+	async #getBlobSize(sha: string): Promise<number> {
+		const cached = this.#blobSizeCache.get(sha);
+		if (cached !== undefined) return cached;
+
+		// If the blob is already in the content cache, use that
+		const blob = this.#blobCache.get(sha);
+		if (blob) {
+			this.#blobSizeCache.set(sha, blob.length);
+			return blob.length;
+		}
+
+		const result = await $`git -C ${this.#repoPath} cat-file -s ${sha}`.quiet().nothrow();
+		if (result.exitCode !== 0) return 0;
+
+		const size = parseInt(result.text().trim(), 10);
+		this.#blobSizeCache.set(sha, size);
+		return size;
+	}
+
 	/** Read a blob's content. Cached by SHA with LRU eviction. */
 	async #readBlob(sha: string): Promise<Buffer> {
 		const cached = this.#blobCache.get(sha);
@@ -335,8 +349,129 @@ export class GitFS implements VirtualFS {
 			if (oldest !== undefined) this.#blobCache.delete(oldest);
 		}
 		this.#blobCache.set(sha, buf);
+		this.#blobSizeCache.set(sha, buf.length);
 
 		return buf;
+	}
+
+	// =========================================================================
+	// Hierarchical ref helpers
+	// =========================================================================
+
+	/**
+	 * Build a tree of ref name segments.
+	 * e.g., ["main", "feature/auth", "feature/login"] becomes:
+	 *   main (leaf) -> refs/heads/main
+	 *   feature (intermediate)
+	 *     auth (leaf) -> refs/heads/feature/auth
+	 *     login (leaf) -> refs/heads/feature/login
+	 */
+	async #buildRefTree(gitPrefix: string): Promise<RefTreeNode> {
+		const refs = await this.#listRefs(gitPrefix);
+		const root: RefTreeNode = { children: new Map(), gitRef: null };
+
+		for (const refName of refs) {
+			const parts = refName.split("/");
+			let node = root;
+			for (let i = 0; i < parts.length; i++) {
+				const part = parts[i];
+				let child = node.children.get(part);
+				if (!child) {
+					child = { children: new Map(), gitRef: null };
+					node.children.set(part, child);
+				}
+				if (i === parts.length - 1) {
+					child.gitRef = gitPrefix + refName;
+				}
+				node = child;
+			}
+		}
+
+		return root;
+	}
+
+	/** Navigate the ref tree to the node at a given filesystem path. */
+	#navigateRefTree(tree: RefTreeNode, fsPath: string, mountPrefix: string): RefTreeNode | null {
+		if (fsPath === mountPrefix) return tree;
+		const relative = fsPath.slice(mountPrefix.length + 1); // strip "/branches/"
+		const parts = relative.split("/");
+		let node = tree;
+		for (const part of parts) {
+			const child = node.children.get(part);
+			if (!child) return null;
+			node = child;
+		}
+		return node;
+	}
+
+	/** Lookup a path under /branches or /tags, handling intermediate directories. */
+	async #lookupRefPath(
+		childPath: string,
+		gitPrefix: string,
+		mountPrefix: string,
+	): Promise<FileAttr | null> {
+		// Check if the node already exists AND has a resolved git tree SHA.
+		// A VIRTUAL_DIR (sha=null) may have been created by a prior readdir
+		// before the ref was resolved — don't return it, fall through to resolve.
+		const existingIno = this.#inodes.getIno(childPath);
+		if (existingIno !== undefined) {
+			const node = this.#nodes.get(existingIno);
+			if (node?.sha) return this.#makeAttr(existingIno);
+		}
+
+		// Build the ref tree and find our position
+		const tree = await this.#buildRefTree(gitPrefix);
+		const refNode = this.#navigateRefTree(tree, childPath, mountPrefix);
+		if (!refNode) return null;
+
+		if (refNode.gitRef) {
+			// Leaf: this is an actual ref — resolve to its commit tree
+			return this.#resolveRef(childPath, refNode.gitRef);
+		}
+
+		// Intermediate directory (e.g., "feature" in "feature/auth")
+		const ino = this.#inodes.getOrAssign(childPath);
+		this.#nodes.set(ino, VIRTUAL_DIR);
+		return { ino, size: 0, kind: "directory", mode: 0o555 };
+	}
+
+	/** List children at a ref level (may be intermediate dirs or leaf refs). */
+	async #readdirRefLevel(
+		dirPath: string,
+		gitPrefix: string,
+		mountPrefix: string,
+		dotEntries: DirEntry[],
+		offset: number,
+	): Promise<DirEntry[]> {
+		// If this inode has a git tree SHA, it's a resolved ref leaf — delegate to tree readdir
+		const dirIno = this.#inodes.getIno(dirPath);
+		if (dirIno !== undefined) {
+			const node = this.#nodes.get(dirIno);
+			if (node && node.sha) {
+				// This is a resolved ref with a git tree — show git content
+				await this.#ensureChildrenResolved(dirIno);
+				const children = this.#childrenCache.get(dirIno);
+				if (!children) return dotEntries.slice(offset);
+				return [...dotEntries, ...children].slice(offset);
+			}
+		}
+
+		// Virtual/intermediate level — show ref tree children
+		const tree = await this.#buildRefTree(gitPrefix);
+		const refNode = this.#navigateRefTree(tree, dirPath, mountPrefix);
+		if (!refNode) return dotEntries.slice(offset);
+
+		const entries: DirEntry[] = [...dotEntries];
+		for (const [name] of refNode.children) {
+			const entryPath = `${dirPath}/${name}`;
+			const entryIno = this.#inodes.getOrAssign(entryPath);
+			if (!this.#nodes.has(entryIno)) {
+				this.#nodes.set(entryIno, VIRTUAL_DIR);
+			}
+			entries.push({ name, ino: entryIno, kind: "directory" });
+		}
+
+		return entries.slice(offset);
 	}
 
 	// =========================================================================
@@ -436,8 +571,8 @@ export class GitFS implements VirtualFS {
 		}
 	}
 
-	/** Build a FileAttr from a stored node. */
-	#makeAttr(ino: Ino): FileAttr | null {
+	/** Build a FileAttr from a stored node. Async because file size requires a git query. */
+	async #makeAttr(ino: Ino): Promise<FileAttr | null> {
 		const node = this.#nodes.get(ino);
 		if (!node) return null;
 
@@ -445,11 +580,9 @@ export class GitFS implements VirtualFS {
 			case "directory":
 				return { ino, size: 0, kind: "directory", mode: 0o555 };
 			case "file": {
-				// Executable bit from git mode (100755)
 				const mode = node.gitMode === "100755" ? 0o555 : 0o444;
-				// We don't know size without reading the blob; report 0 for getattr.
-				// FUSE read() returns the actual bytes regardless.
-				return { ino, size: 0, kind: "file", mode };
+				const size = node.sha ? await this.#getBlobSize(node.sha) : 0;
+				return { ino, size, kind: "file", mode };
 			}
 			case "symlink":
 				return { ino, size: 0, kind: "symlink" };
