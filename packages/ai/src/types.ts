@@ -232,6 +232,8 @@ export interface UserMessage {
 	content: string | (TextContent | ImageContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
+	/** True if this message is an RLM iteration follow-up (continuation, final, error recovery). */
+	rlmIteration?: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

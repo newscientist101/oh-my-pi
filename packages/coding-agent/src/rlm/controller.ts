@@ -107,6 +107,7 @@ function buildContinuationMessage(iterationIndex: number, maxIterations: number)
 			`Continue your analysis or use FINAL()/FINAL_VAR() when ready.${limitWarning}`,
 		timestamp: Date.now(),
 		synthetic: true,
+		rlmIteration: true,
 	};
 }
 
@@ -124,6 +125,7 @@ function buildFinalIterationMessage(): UserMessage {
 			"Use FINAL(your answer) immediately.",
 		timestamp: Date.now(),
 		synthetic: true,
+		rlmIteration: true,
 	};
 }
 
@@ -140,6 +142,7 @@ function buildErrorRecoveryMessage(error: string): UserMessage {
 			"use FINAL() to provide your answer.",
 		timestamp: Date.now(),
 		synthetic: true,
+		rlmIteration: true,
 	};
 }
 
