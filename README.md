@@ -110,6 +110,18 @@ Execute Python code with a persistent IPython kernel and 30+ shell-like helpers:
 - **Mermaid diagrams**: Renders mermaid code blocks as inline graphics in iTerm2/Kitty terminals
 - Install dependencies via `omp setup python`
 
+## + RLM Mode (Recursive Language Model)
+
+Process near-infinite context by giving the LLM a REPL environment with recursive sub-LLM calls:
+
+- **`/rlm` command**: Load context from files (`@path`), URLs, or inline and start iterative processing
+- **Sub-LLM queries**: `llm_query(prompt)` and `llm_query_batched(prompts)` call sub-models via a local HTTP server
+- **Structured termination**: `FINAL(answer)` for direct answers, `FINAL_VAR(variable)` to return a REPL variable
+- **Iteration control**: Configurable max iterations with graceful degradation at limits
+- **Cost tracking**: Per-model token usage and cost aggregation for all sub-LLM calls
+- **Abort propagation**: Three-layer cancellation from Ctrl+C through to in-flight API calls
+- Built on a generic `IterationMode` interface in the agent loop, reusable beyond RLM
+
 ## + LSP Integration (Language Server Protocol)
 
 <p align="center">
