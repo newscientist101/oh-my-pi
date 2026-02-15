@@ -352,6 +352,12 @@ export class AgentSession {
 		abortController: AbortController;
 		previousAutoCompactionEnabled: boolean;
 		cleanup?: () => Promise<void>;
+		// Tracked during iteration for batch summarization
+		iterationResult?: {
+			iterations: number;
+			result: unknown;
+			terminationType: "complete" | "limit";
+		};
 	} | null = null;
 
 	constructor(config: AgentSessionConfig) {
@@ -565,9 +571,19 @@ export class AgentSession {
 			}
 		}
 
-		// Handle iteration events - fold sub-LLM usage into session statistics
-		if ((event.type === "iteration_complete" || event.type === "iteration_limit") && event.subLlmUsage) {
-			this.sessionManager.addSubLlmUsage(event.subLlmUsage);
+		// Handle iteration events - fold sub-LLM usage into session statistics and track iteration result
+		if (event.type === "iteration_complete" || event.type === "iteration_limit") {
+			if (event.subLlmUsage) {
+				this.sessionManager.addSubLlmUsage(event.subLlmUsage);
+			}
+			// Track iteration result for batch summarization in stopRlm()
+			if (this.#rlmState) {
+				this.#rlmState.iterationResult = {
+					iterations: event.type === "iteration_complete" ? event.index + 1 : event.iterations,
+					result: event.type === "iteration_complete" ? event.result : undefined,
+					terminationType: event.type === "iteration_complete" ? "complete" : "limit",
+				};
+			}
 		}
 
 		// Check auto-retry and auto-compaction after agent completes
@@ -1960,17 +1976,24 @@ export class AgentSession {
 	/**
 	 * Stop RLM mode and clean up resources.
 	 *
-	 * Stops the LM handler, clears iteration mode, and restores the base system prompt.
+	 * Stops the LM handler, clears iteration mode, restores the base system prompt,
+	 * and batch-summarizes all RLM iteration messages into a single compaction entry.
 	 */
 	async stopRlm(): Promise<void> {
 		if (!this.#rlmState) {
 			return; // Already stopped or never started
 		}
 
-		const { lmHandler, abortController, previousAutoCompactionEnabled, cleanup } = this.#rlmState;
+		const { lmHandler, abortController, previousAutoCompactionEnabled, cleanup, context, iterationResult } =
+			this.#rlmState;
 
 		// Abort any in-flight RLM operations
 		abortController.abort();
+
+		// Batch-summarize RLM iteration messages before cleanup
+		if (iterationResult) {
+			await this.#summarizeRLMIteration(context, iterationResult, lmHandler);
+		}
 
 		// Clean up temp file
 		if (cleanup) {
@@ -1995,6 +2018,116 @@ export class AgentSession {
 
 		// Clear state
 		this.#rlmState = null;
+	}
+
+	/**
+	 * Batch-summarize all RLM iteration messages into a single compaction entry.
+	 * This is called when RLM mode ends to compact the intermediate iteration turns.
+	 */
+	async #summarizeRLMIteration(
+		context: unknown,
+		iterationResult: {
+			iterations: number;
+			result: unknown;
+			terminationType: "complete" | "limit";
+		},
+		lmHandler: LMHandler,
+	): Promise<void> {
+		try {
+			// Find all RLM iteration messages in the current branch
+			const entries = this.sessionManager.getBranch();
+			const rlmMessageIndices: number[] = [];
+
+			for (let i = 0; i < entries.length; i++) {
+				const entry = entries[i];
+				if (entry.type === "message" && entry.message.role === "user") {
+					const userMsg = entry.message as { rlmIteration?: boolean };
+					if (userMsg.rlmIteration) {
+						rlmMessageIndices.push(i);
+					}
+				}
+			}
+
+			// Skip if no RLM iteration messages found
+			if (rlmMessageIndices.length === 0) {
+				return;
+			}
+
+			// Find the first RLM message's entry to use as firstKeptEntryId
+			// The compaction will replace all messages before this point
+			const firstRlmIndex = rlmMessageIndices[0];
+			const firstKeptEntry = entries[firstRlmIndex];
+
+			if (!firstKeptEntry?.id) {
+				logger.warn("RLM summarization: first kept entry has no ID");
+				return;
+			}
+
+			// Build the summary
+			const contextType = typeof context === "string" ? "text" : "JSON";
+			const contextLength = typeof context === "string" ? context.length : JSON.stringify(context).length;
+
+			// Get sub-LLM usage summary
+			const usage = lmHandler.getUsage();
+			let totalCalls = 0;
+			let totalCost = 0;
+			for (const modelUsage of usage.values()) {
+				totalCalls += modelUsage.calls;
+				totalCost += modelUsage.cost;
+			}
+
+			// Format the result preview (truncate if too long)
+			let resultPreview = "";
+			if (iterationResult.result !== undefined) {
+				const resultStr =
+					typeof iterationResult.result === "string"
+						? iterationResult.result
+						: JSON.stringify(iterationResult.result);
+				resultPreview = resultStr.length > 500 ? `${resultStr.slice(0, 500)}...` : resultStr;
+			}
+
+			// Build summary text
+			const terminationMsg =
+				iterationResult.terminationType === "complete" ? "completed successfully" : "reached iteration limit";
+
+			const summary =
+				`## RLM Analysis ${terminationMsg === "completed successfully" ? "Complete" : "(Limit Reached)"}\n\n` +
+				`Analyzed ${contextType} context (${contextLength.toLocaleString()} chars) over ${iterationResult.iterations} iteration(s).\n` +
+				(totalCalls > 0 ? `Sub-LLM calls: ${totalCalls} call(s) (cost: $${totalCost.toFixed(4)})\n` : "") +
+				(resultPreview ? `\n**Final Answer:**\n${resultPreview}` : "");
+
+			const shortSummary =
+				`RLM: ${iterationResult.iterations} iteration(s), ` +
+				`${contextType} context, ` +
+				(totalCalls > 0 ? `${totalCalls} sub-LLM call(s)` : "no sub-LLM calls");
+
+			// Create the compaction entry
+			// Note: We estimate tokens as 0 since we're not replacing based on token count
+			// but rather consolidating RLM iteration messages specifically
+			this.sessionManager.appendCompaction(
+				summary,
+				shortSummary,
+				firstKeptEntry.id,
+				0, // tokensBefore - not applicable for RLM compaction
+				{
+					rlmSummary: true,
+					iterations: iterationResult.iterations,
+					terminationType: iterationResult.terminationType,
+					subLlmCalls: totalCalls,
+					subLlmCost: totalCost,
+				},
+				false, // fromExtension
+			);
+
+			logger.debug("RLM summarization complete", {
+				iterations: iterationResult.iterations,
+				rlmMessages: rlmMessageIndices.length,
+				subLlmCalls: totalCalls,
+			});
+		} catch (err) {
+			// Don't let summarization errors prevent cleanup
+			logger.warn("RLM summarization failed", { error: err instanceof Error ? err.message : String(err) });
+		}
 	}
 
 	/**

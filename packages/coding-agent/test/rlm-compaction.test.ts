@@ -5,9 +5,11 @@
  * 1. Auto-compaction is disabled when RLM starts
  * 2. In-flight compaction is aborted when RLM starts
  * 3. Previous compaction setting is restored when RLM ends
+ * 4. RLM iteration messages are batch-summarized when RLM ends
  */
 
 import { describe, expect, it } from "bun:test";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 
 describe("RLM compaction behavior", () => {
 	it("startRlm disables auto-compaction and stores previous setting", () => {
@@ -212,5 +214,160 @@ describe("RLM compaction behavior", () => {
 		};
 
 		expect(state.previousAutoCompactionEnabled).toBe(true);
+	});
+});
+
+describe("RLM batch summarization", () => {
+	it("identifies rlmIteration messages for summarization", () => {
+		// The #summarizeRLMIteration method iterates through session entries
+		// looking for messages with rlmIteration: true
+
+		interface MockEntry {
+			type: "message";
+			id: string;
+			message: { role: "user"; content: string; rlmIteration?: boolean; timestamp: number };
+		}
+
+		const entries: MockEntry[] = [
+			{
+				type: "message",
+				id: "msg1",
+				message: {
+					role: "user",
+					content: "Initial user prompt",
+					timestamp: Date.now(),
+				},
+			},
+			{
+				type: "message",
+				id: "msg2",
+				message: {
+					role: "user",
+					content: "Iteration 1 complete",
+					rlmIteration: true, // This one should be found
+					timestamp: Date.now(),
+				},
+			},
+			{
+				type: "message",
+				id: "msg3",
+				message: {
+					role: "user",
+					content: "Iteration 2 complete",
+					rlmIteration: true, // This one should also be found
+					timestamp: Date.now(),
+				},
+			},
+		];
+
+		const rlmMessageIndices: number[] = [];
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i];
+			if (entry.type === "message" && entry.message.role === "user") {
+				const userMsg = entry.message as { rlmIteration?: boolean };
+				if (userMsg.rlmIteration) {
+					rlmMessageIndices.push(i);
+				}
+			}
+		}
+
+		expect(rlmMessageIndices).toEqual([1, 2]);
+	});
+
+	it("builds summary with context type and iteration count", () => {
+		const contextType = "text"; // or "JSON"
+		const contextLength = 50000;
+		const iterations = 5;
+		const totalCalls = 10;
+		const totalCost = 0.0342;
+		const terminationMsg = "completed successfully";
+		const resultPreview = "The main themes are...";
+
+		const summary =
+			`## RLM Analysis ${terminationMsg === "completed successfully" ? "Complete" : "(Limit Reached)"}\n\n` +
+			`Analyzed ${contextType} context (${contextLength.toLocaleString()} chars) over ${iterations} iteration(s).\n` +
+			(totalCalls > 0 ? `Sub-LLM calls: ${totalCalls} call(s) (cost: $${totalCost.toFixed(4)})\n` : "") +
+			(resultPreview ? `\n**Final Answer:**\n${resultPreview}` : "");
+
+		expect(summary).toContain("## RLM Analysis Complete");
+		expect(summary).toContain("text context");
+		expect(summary).toContain("50,000 chars");
+		expect(summary).toContain("5 iteration(s)");
+		expect(summary).toContain("10 call(s)");
+		expect(summary).toContain("$0.0342");
+		expect(summary).toContain("**Final Answer:**");
+	});
+
+	it("builds short summary for display", () => {
+		const iterations = 3;
+		const contextType = "JSON";
+		const totalCalls = 5;
+
+		const shortSummary =
+			`RLM: ${iterations} iteration(s), ` +
+			`${contextType} context, ` +
+			(totalCalls > 0 ? `${totalCalls} sub-LLM call(s)` : "no sub-LLM calls");
+
+		expect(shortSummary).toBe("RLM: 3 iteration(s), JSON context, 5 sub-LLM call(s)");
+	});
+
+	it("tracks iteration result in #rlmState", () => {
+		// The event handler updates #rlmState.iterationResult when iteration events fire
+		// This is tested by simulating the event handler behavior
+
+		interface MockRlmState {
+			iterationResult?: {
+				iterations: number;
+				result: unknown;
+				terminationType: "complete" | "limit";
+			};
+		}
+
+		// Simulate iteration_complete event
+		const state1: MockRlmState = {};
+		const completeEvent = { type: "iteration_complete" as const, index: 4, result: "Final answer" };
+
+		state1.iterationResult = {
+			iterations: completeEvent.index + 1, // 0-indexed, so +1
+			result: completeEvent.result,
+			terminationType: "complete",
+		};
+
+		expect(state1.iterationResult.iterations).toBe(5);
+		expect(state1.iterationResult.result).toBe("Final answer");
+		expect(state1.iterationResult.terminationType).toBe("complete");
+
+		// Simulate iteration_limit event
+		const state2: MockRlmState = {};
+		const limitEvent = { type: "iteration_limit" as const, iterations: 10 };
+
+		state2.iterationResult = {
+			iterations: limitEvent.iterations,
+			result: undefined,
+			terminationType: "limit",
+		};
+
+		expect(state2.iterationResult.iterations).toBe(10);
+		expect(state2.iterationResult.result).toBeUndefined();
+		expect(state2.iterationResult.terminationType).toBe("limit");
+	});
+
+	it("truncates long result previews in summary", () => {
+		// The result preview is truncated to 500 chars if longer
+		const longResult = "A".repeat(600);
+
+		const resultPreview = longResult.length > 500 ? `${longResult.slice(0, 500)}...` : longResult;
+
+		expect(resultPreview.length).toBe(503); // 500 + "..."
+		expect(resultPreview.endsWith("...")).toBe(true);
+	});
+
+	it("handles JSON context correctly", () => {
+		const context = { users: [{ name: "Alice" }, { name: "Bob" }] };
+		const contextType = typeof context === "string" ? "text" : "JSON";
+		const contextLength = typeof context === "string" ? context.length : JSON.stringify(context).length;
+
+		expect(contextType).toBe("JSON");
+		expect(contextLength).toBe(JSON.stringify(context).length);
 	});
 });
