@@ -3,6 +3,25 @@
  *
  * Provides a local HTTP endpoint that the Python REPL can call to make
  * sub-LLM queries during RLM iterations. Uses session token auth.
+ *
+ * ## Security Model
+ *
+ * **Token Scope & Lifetime:**
+ * - Token is generated per-session via `crypto.randomUUID()` in the constructor
+ * - Token is stored only in memory (never persisted to disk or logs)
+ * - Token is invalidated when `LMHandler.stop()` is called
+ * - Session end, `/new` command, and cleanup all trigger `stop()`
+ * - No token rotation within a session; relies on short session lifetime
+ *
+ * **Network Binding:**
+ * - Server binds exclusively to `127.0.0.1` (localhost only)
+ * - URL is constructed internally from the bound port (no external input)
+ * - Python prelude validates that the URL hostname is loopback before accepting
+ *
+ * **Authorization:**
+ * - All requests must include `Authorization: Bearer <token>` header
+ * - Invalid/missing tokens return HTTP 401 Unauthorized
+ * - Token is passed to Python prelude via `_configure()` call
  */
 
 import type { SubLlmUsage } from "@oh-my-pi/pi-agent-core";
@@ -39,10 +58,28 @@ type LMRequest = SingleRequest | BatchedRequest;
 /**
  * HTTP server for sub-LLM calls from Python prelude.
  *
- * - Binds to localhost only (127.0.0.1)
- * - Auto-assigns port (port 0)
- * - Session token auth via Authorization header
- * - Tracks per-model usage for cost reporting
+ * ## Lifecycle
+ *
+ * 1. **Construction**: Token generated, server not yet running
+ * 2. **start()**: Server binds to localhost:0, begins accepting requests
+ * 3. **stop()**: Server stops, token invalidated, all pending requests cancelled
+ *
+ * Multiple calls to start()/stop() are safe (idempotent).
+ *
+ * ## Token Security
+ *
+ * The session token (`crypto.randomUUID()`) is:
+ * - Generated once per LMHandler instance (constructor)
+ * - Valid only while the server is running
+ * - Required on every request via `Authorization: Bearer <token>`
+ * - Never persisted, logged, or transmitted outside the local process
+ *
+ * ## Network Security
+ *
+ * - Binds exclusively to 127.0.0.1 (localhost)
+ * - Port is auto-assigned by the OS (port 0)
+ * - URL is constructed from the bound port (no user input)
+ * - Python prelude validates URL hostname is loopback before use
  */
 export class LMHandler {
 	#server: Bun.Server<unknown> | null = null;

@@ -1,4 +1,27 @@
-"""RLM functions injected into IPython kernel when RLM mode is active."""
+"""RLM functions injected into IPython kernel when RLM mode is active.
+
+Security Model:
+--------------
+The RLM prelude communicates with a local HTTP server (LMHandler) for sub-LLM queries.
+Security is enforced through multiple layers:
+
+1. **Token Authentication**: Every request requires a Bearer token in the
+   Authorization header. The token is generated per-session, stored only in
+   memory, and invalidated when the session ends.
+
+2. **Loopback-Only**: The _configure() function validates that the handler URL
+   hostname is a loopback address (127.0.0.1, localhost, or ::1). This prevents
+   accidentally connecting to external servers.
+
+3. **Timeout**: All requests have a configurable timeout (default 300s) to
+   prevent indefinite hangs.
+
+Token Lifecycle:
+- Token is passed via _configure() when RLM mode starts
+- Token is valid only for the current session
+- Token is invalidated when LMHandler.stop() is called (session end, /new, cleanup)
+- No token rotation within a session; relies on short session lifetime
+"""
 
 import json as _json
 import urllib.error as _urllib_error
@@ -14,11 +37,22 @@ _TIMEOUT: int = 300  # seconds; configurable via _configure()
 def _configure(url: str, token: str, depth: int = 0, timeout: int = 300) -> None:
     """Called by the TypeScript side to set up the handler connection.
 
+    This function is called automatically when RLM mode starts. It validates
+    the handler URL is loopback-only for security before accepting it.
+
+    Security:
+        - URL hostname must be 127.0.0.1, localhost, or ::1 (raises ValueError otherwise)
+        - Token is per-session, memory-only, invalidated when session ends
+        - See module docstring for full security model
+
     Args:
         url: The LM handler URL (must be loopback: 127.0.0.1 or localhost)
-        token: Session token for authorization
+        token: Session token for authorization (per-session, memory-only)
         depth: Current recursion depth (incremented for nested llm_query calls)
         timeout: Request timeout in seconds (default 300)
+
+    Raises:
+        ValueError: If URL hostname is not a loopback address
     """
     global _HANDLER_URL, _SESSION_TOKEN, _DEPTH, _TIMEOUT
 
