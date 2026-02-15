@@ -796,4 +796,167 @@ FINAL_VAR: summary
 			await expect(mode.checkTermination(message)).rejects.toThrow();
 		});
 	});
+
+	describe("iteration-level failure recovery", () => {
+		it("returns recovery prompt when executePython throws unexpected error", async () => {
+			const executePython = mock(async () => {
+				throw new Error("Kernel connection lost");
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(my_var)");
+
+			// Should NOT throw, should return recovery prompt
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Previous attempt failed")).toBe(
+					true,
+				);
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Kernel connection lost")).toBe(
+					true,
+				);
+				expect(typeof followUp?.content === "string" && followUp.content.includes("Try a different approach")).toBe(
+					true,
+				);
+			}
+		});
+
+		it("recovery prompt does not crash the agent loop", async () => {
+			const executePython = mock(async () => {
+				throw new Error("Network timeout");
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(result)");
+
+			// Verify calling checkTermination doesn't throw
+			const result = await mode.checkTermination(message);
+
+			// Result is valid and usable by agent loop
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				expect(result.followUp).toBeArray();
+				expect(result.followUp.length).toBeGreaterThan(0);
+				expect(result.followUp[0]?.role).toBe("user");
+			}
+		});
+
+		it("can recover and continue after an error", async () => {
+			let callCount = 0;
+			const executePython = mock(async () => {
+				callCount++;
+				if (callCount === 1) {
+					throw new Error("First call fails");
+				}
+				return { output: "'success'", exitCode: 0 };
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+
+			// First call fails with recovery prompt
+			const result1 = await mode.checkTermination(createAssistantMessage("FINAL_VAR(x)"));
+			expect(result1.done).toBe(false);
+
+			// Second call succeeds after "agent" tries again
+			const result2 = await mode.checkTermination(createAssistantMessage("FINAL_VAR(x)"));
+			expect(result2.done).toBe(true);
+			if (result2.done) {
+				expect(result2.result).toBe("'success'");
+			}
+		});
+
+		it("handles non-Error objects thrown", async () => {
+			const executePython = mock(async () => {
+				throw "string error"; // Some code throws non-Error objects
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const message = createAssistantMessage("FINAL_VAR(x)");
+
+			// Should handle gracefully, not crash
+			const result = await mode.checkTermination(message);
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				expect(typeof followUp?.content === "string" && followUp.content.includes("string error")).toBe(true);
+			}
+		});
+
+		it("distinguishes abort signal from other errors", async () => {
+			// Without abort signal, error gets recovery prompt
+			const executePythonNoAbort = mock(async () => {
+				throw new Error("Some error");
+			});
+			const depsNoAbort: RLMDeps = {
+				executePython: executePythonNoAbort,
+				lmHandler: createMockLMHandler(),
+				// No signal
+			};
+
+			const modeNoAbort = createRLMIterationMode(defaultConfig, depsNoAbort);
+			const resultNoAbort = await modeNoAbort.checkTermination(createAssistantMessage("FINAL_VAR(x)"));
+
+			expect(resultNoAbort.done).toBe(false); // Recovery prompt, no throw
+
+			// With aborted signal, error propagates
+			const controller = new AbortController();
+			controller.abort();
+
+			const executePythonAborted = mock(async () => {
+				throw new Error("Aborted");
+			});
+			const depsAborted: RLMDeps = {
+				executePython: executePythonAborted,
+				lmHandler: createMockLMHandler(),
+				signal: controller.signal,
+			};
+
+			const modeAborted = createRLMIterationMode(defaultConfig, depsAborted);
+
+			// Should throw, not return recovery prompt
+			await expect(modeAborted.checkTermination(createAssistantMessage("FINAL_VAR(x)"))).rejects.toThrow();
+		});
+
+		it("recovery message has correct metadata for export/compaction", async () => {
+			const executePython = mock(async () => {
+				throw new Error("Test error");
+			});
+			const deps: RLMDeps = {
+				executePython,
+				lmHandler: createMockLMHandler(),
+			};
+
+			const mode = createRLMIterationMode(defaultConfig, deps);
+			const result = await mode.checkTermination(createAssistantMessage("FINAL_VAR(x)"));
+
+			expect(result.done).toBe(false);
+			if (!result.done) {
+				const followUp = result.followUp[0] as UserMessage;
+				// Recovery messages should be marked for filtering from exports
+				expect(followUp?.synthetic).toBe(true);
+				// And for batch-summarization in compaction
+				expect(followUp?.rlmIteration).toBe(true);
+			}
+		});
+	});
 });
