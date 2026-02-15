@@ -49,6 +49,47 @@ const mnt = await mount(composite, "/tmp/agent-workspace");
 // /tmp/agent-workspace/sessions/...
 ```
 
+## Git Filesystem
+
+Expose a git repository's branches, tags, and commits as a read-only directory tree:
+
+```typescript
+import { GitFS, mount } from "@oh-my-pi/pi-fuse";
+
+const gitFs = new GitFS("/path/to/repo");
+const mnt = await mount(gitFs, "/tmp/git-mount");
+
+// Browse branches:
+//   ls /tmp/git-mount/branches/main/src/
+//   cat /tmp/git-mount/branches/feature/README.md
+
+// Browse tags:
+//   ls /tmp/git-mount/tags/v1.0.0/
+
+// Browse commits by SHA:
+//   cat /tmp/git-mount/commits/abc1234.../package.json
+
+// HEAD is a symlink to the current branch:
+//   readlink /tmp/git-mount/HEAD  ->  branches/main
+
+await mnt.unmount();
+```
+
+### Layout
+
+```
+/HEAD              -> symlink to branches/<current> or commits/<sha>
+/branches/
+  main/            -> tree at main's HEAD
+  feature-x/       -> tree at feature-x's HEAD
+/tags/
+  v1.0.0/          -> tree at the tagged commit
+/commits/
+  <sha>/           -> tree at any commit (virtual: lookup-only, not enumerated)
+```
+
+All resolution is lazy — tree entries are fetched one level at a time, blob content on demand. Git objects are cached by SHA (immutable, naturally deduplicates across refs). Call `gitFs.refresh()` to pick up new commits and branches.
+
 ## Custom VirtualFS
 
 ```typescript

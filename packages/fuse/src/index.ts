@@ -16,6 +16,7 @@
  */
 
 export { createCompositeFS } from "./composite-fs";
+export { GitFS } from "./git-fs";
 export { InodeMap } from "./inode-map";
 export { MemoryFS } from "./memory-fs";
 export type { FuseMount, MountOptions } from "./mount";
