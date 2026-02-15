@@ -70,6 +70,7 @@
         "@oh-my-pi/omp-stats": "workspace:*",
         "@oh-my-pi/pi-agent-core": "workspace:*",
         "@oh-my-pi/pi-ai": "workspace:*",
+        "@oh-my-pi/pi-fuse": "workspace:*",
         "@oh-my-pi/pi-natives": "workspace:*",
         "@oh-my-pi/pi-tui": "workspace:*",
         "@oh-my-pi/pi-utils": "workspace:*",

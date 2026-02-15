@@ -84,6 +84,7 @@
 	},
 	"dependencies": {
 		"@mozilla/readability": "0.6.0",
+		"@oh-my-pi/pi-fuse": "workspace:*",
 		"@oh-my-pi/omp-stats": "workspace:*",
 		"@oh-my-pi/pi-agent-core": "workspace:*",
 		"@oh-my-pi/pi-ai": "workspace:*",

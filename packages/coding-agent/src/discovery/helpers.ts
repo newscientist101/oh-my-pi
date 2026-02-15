@@ -177,6 +177,8 @@ export interface ParsedAgentFields {
 	model?: string[];
 	output?: unknown;
 	thinkingLevel?: ThinkingLevel;
+	/** Virtual filesystems to mount for this agent (e.g., ["git"]). */
+	fuse?: string[];
 }
 
 /**
@@ -221,8 +223,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const output = frontmatter.output !== undefined ? frontmatter.output : undefined;
 	const model = parseModelList(frontmatter.model);
 	const thinkingLevel = parseThinkingLevel(frontmatter);
+	const fuse = parseArrayOrCSV(frontmatter.fuse);
 
-	return { name, description, tools, spawns, model, output, thinkingLevel };
+	return { name, description, tools, spawns, model, output, thinkingLevel, fuse };
 }
 
 async function globIf(

@@ -883,6 +883,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				skipPythonPreflight,
 				enableMCP,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				fuseFilesystems: agent.fuse,
 			});
 
 			activeSession = session;

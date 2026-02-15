@@ -45,8 +45,8 @@ interface TreeEntry {
 
 interface GitNode {
 	kind: "file" | "directory" | "symlink";
-	/** Git object SHA — used for lazy content resolution. */
-	sha: string;
+	/** Git object SHA — used for lazy content resolution. Null for virtual entries (e.g., HEAD symlink). */
+	sha: string | null;
 	/** Unix mode from git (for executable detection). */
 	gitMode: string;
 }

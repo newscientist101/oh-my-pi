@@ -127,6 +127,8 @@ export interface AgentDefinition {
 	model?: string[];
 	thinkingLevel?: ThinkingLevel;
 	output?: unknown;
+	/** Virtual filesystems to mount for this agent (e.g., ["git"]). */
+	fuse?: string[];
 	source: AgentSource;
 	filePath?: string;
 }

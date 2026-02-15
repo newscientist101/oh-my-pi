@@ -176,6 +176,8 @@ export interface ToolSession {
 	getCompactContext?: () => string;
 	/** RLM state (when active, Python tool injects prelude on first execution) */
 	rlm?: RLMToolState;
+	/** FUSE mount manager for virtual filesystems (git, etc.) */
+	fuseManager?: import("@oh-my-pi/pi-fuse").FuseManager;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;

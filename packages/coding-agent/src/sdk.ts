@@ -1,7 +1,10 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Message, type Model, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { FuseManager, GitFS } from "@oh-my-pi/pi-fuse";
 import { $env, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
@@ -165,6 +168,9 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+
+	/** Virtual filesystems to mount (e.g., ["git"]). Typically set from agent definition. */
+	fuseFilesystems?: string[];
 }
 
 /** Result from createAgentSession */
@@ -776,6 +782,38 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
 	);
 
+	// Set up FUSE virtual filesystems if requested
+	if (options.fuseFilesystems && options.fuseFilesystems.length > 0) {
+		const fuseManager = new FuseManager();
+		for (const fsName of options.fuseFilesystems) {
+			switch (fsName) {
+				case "git":
+					fuseManager.register("git", () => new GitFS(cwd));
+					break;
+				default:
+					logger.warn("Unknown FUSE filesystem requested", { name: fsName });
+			}
+		}
+		if (fuseManager.hasFilesystems) {
+			const fuseMountSessionId = sessionManager.getSessionId?.() ?? "default";
+			const mountBase = path.join(os.tmpdir(), "omp-fuse", fuseMountSessionId);
+			try {
+				await fuseManager.mount(mountBase);
+				toolSession.fuseManager = fuseManager;
+				postmortem.register(`fuse-cleanup-${fuseMountSessionId}`, () => fuseManager.unmount());
+				logger.debug("FUSE filesystems mounted", {
+					mountPoint: mountBase,
+					filesystems: fuseManager.registeredNames,
+				});
+			} catch (err) {
+				logger.error("Failed to mount FUSE filesystems", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}
+	debugStartup("sdk:fuseMounts");
+
 	debugStartup("sdk:createTools:start");
 	// Create and wrap tools with meta notice formatting
 	const rawBuiltinTools = await createTools(toolSession, options.toolNames);
@@ -992,6 +1030,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
 		const memoryInstructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+
+		// Build FUSE mount info for system prompt
+		let fuseAppendPrompt = "";
+		if (toolSession.fuseManager?.mounted) {
+			const mp = toolSession.fuseManager.mountPoint;
+			const names = toolSession.fuseManager.registeredNames;
+			const lines = [`\n<fuse_filesystems mount="${mp}">`];
+			for (const name of names) {
+				if (name === "git") {
+					lines.push(
+						`  ${mp}/git/ - Read-only git repository browser. Browse branches (git/branches/<name>/), tags (git/tags/<name>/), and commits by SHA (git/commits/<sha>/). HEAD is a symlink to the current branch.`,
+					);
+				} else {
+					lines.push(`  ${mp}/${name}/`);
+				}
+			}
+			lines.push("</fuse_filesystems>");
+			fuseAppendPrompt = lines.join("\n");
+		}
+		const combinedAppend = [memoryInstructions, fuseAppendPrompt].filter(Boolean).join("\n");
+
 		const defaultPrompt = await buildSystemPromptInternal({
 			cwd,
 			skills,
@@ -1001,7 +1060,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			toolNames,
 			rules: rulebookRules,
 			skillsSettings: settings.getGroup("skills") as SkillsSettings,
-			appendSystemPrompt: memoryInstructions,
+			appendSystemPrompt: combinedAppend,
 			repeatToolDescriptions,
 		});
 
@@ -1019,7 +1078,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				rules: rulebookRules,
 				skillsSettings: settings.getGroup("skills") as SkillsSettings,
 				customPrompt: options.systemPrompt,
-				appendSystemPrompt: memoryInstructions,
+				appendSystemPrompt: combinedAppend,
 				repeatToolDescriptions,
 			});
 		}
