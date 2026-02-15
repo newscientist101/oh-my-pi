@@ -4,12 +4,13 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { FileType, glob } from "@oh-my-pi/pi-natives";
 import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils/dirs";
-import { readDirEntries, readFile } from "../capability/fs";
+import { readFile } from "../capability/fs";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { parseFrontmatter } from "../utils/frontmatter";
-import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher, shouldIgnore } from "../utils/ignore-files";
+import type { IgnoreMatcher } from "../utils/ignore-files";
 
 const VALID_THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -224,6 +225,20 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	return { name, description, tools, spawns, model, output, thinkingLevel };
 }
 
+async function globIf(
+	dir: string,
+	pattern: string,
+	fileType: FileType,
+	recursive: boolean = true,
+): Promise<Array<{ path: string }>> {
+	try {
+		const result = await glob({ pattern, path: dir, gitignore: true, hidden: false, fileType, recursive });
+		return result.matches;
+	} catch {
+		return [];
+	}
+}
+
 export async function loadSkillsFromDir(
 	_ctx: LoadContext,
 	options: {
@@ -236,39 +251,42 @@ export async function loadSkillsFromDir(
 	const items: Skill[] = [];
 	const warnings: string[] = [];
 	const { dir, level, providerId, requireDescription = false } = options;
+	// Use native glob to find all SKILL.md files one level deep
+	// Pattern */SKILL.md matches <dir>/<subdir>/SKILL.md
+	const discoveredMatches = new Set<string>();
+	for (const match of await globIf(dir, "*/SKILL.md", FileType.File)) {
+		discoveredMatches.add(match.path);
+	}
+	for (const match of await globIf(dir, "*", FileType.Dir, false)) {
+		const skillRelPath = `${match.path}/SKILL.md`;
+		const content = await readFile(path.join(dir, skillRelPath));
+		if (content !== null) {
+			discoveredMatches.add(skillRelPath);
+		}
+	}
+	const matches = [...discoveredMatches].map(path => ({ path }));
+	if (matches.length === 0) {
+		return { items, warnings };
+	}
 
-	// Initialize ignore matcher and read ignore rules from root
-	const ig = createIgnoreMatcher();
-	await addIgnoreRules(ig, dir, dir, readFile);
-
-	const entries = await readDirEntries(dir);
-	const skillDirs = entries.filter(
-		entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules",
-	);
-
+	// Read all skill files in parallel
 	const results = await Promise.all(
-		skillDirs.map(async entry => {
-			const entryPath = path.join(dir, entry.name);
-
-			// Check if this directory should be ignored
-			if (shouldIgnore(ig, dir, entryPath, true)) {
-				return { item: null as Skill | null, warning: null as string | null };
-			}
-
-			const skillFile = path.join(entryPath, "SKILL.md");
+		matches.map(async match => {
+			const skillFile = path.join(dir, match.path);
 			const content = await readFile(skillFile);
 			if (!content) {
 				return { item: null as Skill | null, warning: null as string | null };
 			}
-
 			const { frontmatter, body } = parseFrontmatter(content, { source: skillFile });
 			if (requireDescription && !frontmatter.description) {
 				return { item: null as Skill | null, warning: null as string | null };
 			}
 
+			// Extract skill name from path: "<skilldir>/SKILL.md" -> "<skilldir>"
+			const skillDirName = path.basename(path.dirname(skillFile));
 			return {
 				item: {
-					name: (frontmatter.name as string) || entry.name,
+					name: (frontmatter.name as string) || skillDirName,
 					path: skillFile,
 					content: body,
 					frontmatter: frontmatter as SkillFrontmatter,
@@ -279,12 +297,10 @@ export async function loadSkillsFromDir(
 			};
 		}),
 	);
-
 	for (const result of results) {
 		if (result.warning) warnings.push(result.warning);
 		if (result.item) items.push(result.item);
 	}
-
 	return { items, warnings };
 }
 
@@ -322,8 +338,8 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 }
 
 /**
- * Load files from a directory matching a pattern.
- * Respects .gitignore, .ignore, and .fdignore files.
+ * Load files from a directory matching extensions.
+ * Uses native glob for fast filesystem scanning with gitignore support.
  */
 export async function loadFilesFromDir<T>(
 	_ctx: LoadContext,
@@ -335,85 +351,70 @@ export async function loadFilesFromDir<T>(
 		extensions?: string[];
 		/** Transform file to item (return null to skip) */
 		transform: (name: string, content: string, path: string, source: SourceMeta) => T | null;
-		/** Whether to recurse into subdirectories */
+		/** Whether to recurse into subdirectories (default: false) */
 		recursive?: boolean;
-		/** Root directory for ignore file handling (defaults to dir) */
+		/** Root directory for ignore file handling (unused, kept for API compat) */
 		rootDir?: string;
-		/** Ignore matcher (used internally for recursion) */
+		/** Ignore matcher (unused, kept for API compat) */
 		ignoreMatcher?: IgnoreMatcher;
 	},
 ): Promise<LoadResult<T>> {
-	const rootDir = options.rootDir ?? dir;
-	const ig = options.ignoreMatcher ?? createIgnoreMatcher();
-
-	// Read ignore rules from this directory
-	await addIgnoreRules(ig, dir, rootDir, readFile);
-
-	const entries = await readDirEntries(dir);
-
-	const visibleEntries = entries.filter(entry => !entry.name.startsWith("."));
-
-	const directories = options.recursive
-		? visibleEntries.filter(entry => {
-				if (!entry.isDirectory()) return false;
-				const entryPath = path.join(dir, entry.name);
-				return !shouldIgnore(ig, rootDir, entryPath, true);
-			})
-		: [];
-
-	const files = visibleEntries.filter(entry => {
-		if (!entry.isFile()) return false;
-		const entryPath = path.join(dir, entry.name);
-		if (shouldIgnore(ig, rootDir, entryPath, false)) return false;
-		if (!options.extensions) return true;
-		return options.extensions.some(ext => entry.name.endsWith(`.${ext}`));
-	});
-
-	const [subResults, fileResults] = await Promise.all([
-		Promise.all(
-			directories.map(entry =>
-				loadFilesFromDir(_ctx, path.join(dir, entry.name), provider, level, {
-					...options,
-					rootDir,
-					ignoreMatcher: ig,
-				}),
-			),
-		),
-		Promise.all(
-			files.map(async entry => {
-				const filePath = path.join(dir, entry.name);
-				const content = await readFile(filePath);
-				return { entry, path: filePath, content };
-			}),
-		),
-	]);
-
 	const items: T[] = [];
 	const warnings: string[] = [];
+	// Build glob pattern based on extensions and recursion
+	const { extensions, recursive = false } = options;
 
-	for (const subResult of subResults) {
-		items.push(...subResult.items);
-		if (subResult.warnings) warnings.push(...subResult.warnings);
+	let pattern: string;
+	if (extensions && extensions.length > 0) {
+		const extPattern = extensions.length === 1 ? extensions[0] : `{${extensions.join(",")}}`;
+		pattern = recursive ? `**/*.${extPattern}` : `*.${extPattern}`;
+	} else {
+		pattern = recursive ? "**/*" : "*";
 	}
 
-	for (const { entry, path, content } of fileResults) {
+	// Use native glob for fast scanning with gitignore support
+	let matches: Array<{ path: string }>;
+	try {
+		const result = await glob({
+			pattern,
+			path: dir,
+			gitignore: true,
+			hidden: false,
+			fileType: FileType.File,
+		});
+		matches = result.matches;
+	} catch {
+		// Directory doesn't exist or isn't readable
+		return { items, warnings };
+	}
+
+	// Read all matching files in parallel
+	const fileResults = await Promise.all(
+		matches.map(async match => {
+			const filePath = path.join(dir, match.path);
+			const content = await readFile(filePath);
+			return { filePath, content };
+		}),
+	);
+
+	for (const { filePath, content } of fileResults) {
 		if (content === null) {
-			warnings.push(`Failed to read file: ${path}`);
+			warnings.push(`Failed to read file: ${filePath}`);
 			continue;
 		}
 
-		const source = createSourceMeta(provider, path, level);
+		const name = path.basename(filePath);
+		const source = createSourceMeta(provider, filePath, level);
 
 		try {
-			const item = options.transform(entry.name, content, path, source);
+			const item = options.transform(name, content, filePath, source);
 			if (item !== null) {
 				items.push(item);
 			}
 		} catch (err) {
-			warnings.push(`Failed to parse ${path}: ${err}`);
+			warnings.push(`Failed to parse ${filePath}: ${err}`);
 		}
 	}
-
 	return { items, warnings };
 }
 
@@ -458,10 +459,6 @@ async function readExtensionModuleManifest(
 	return null;
 }
 
-function isExtensionModuleFile(name: string): boolean {
-	return name.endsWith(".ts") || name.endsWith(".js");
-}
-
 /**
  * Discover extension module entry points in a directory.
  *
@@ -471,61 +468,58 @@ function isExtensionModuleFile(name: string): boolean {
  * 3. Subdirectory with package.json: `extensions/<ext>/package.json` with "omp"/"pi" field → load declared paths
  *
  * No recursion beyond one level. Complex packages must use package.json manifest.
- * Respects .gitignore, .ignore, and .fdignore files.
+ * Uses native glob for fast filesystem scanning with gitignore support.
  */
-export async function discoverExtensionModulePaths(ctx: LoadContext, dir: string): Promise<string[]> {
-	const discovered: string[] = [];
-	const entries = await readDirEntries(dir);
+export async function discoverExtensionModulePaths(_ctx: LoadContext, dir: string): Promise<string[]> {
+	const discovered = new Set<string>();
+	// Find all candidate files in parallel using glob
+	const [directFiles, indexFiles, packageJsonFiles] = await Promise.all([
+		// 1. Direct *.ts or *.js files
+		globIf(dir, "*.{ts,js}", FileType.File, false),
+		// 2. Subdirectory index files
+		globIf(dir, "*/index.{ts,js}", FileType.File),
+		// 3. Subdirectory package.json files
+		globIf(dir, "*/package.json", FileType.File),
+	]);
 
-	// Initialize ignore matcher and read ignore rules from root
-	const ig = createIgnoreMatcher();
-	await addIgnoreRules(ig, dir, dir, readFile);
-
-	for (const entry of entries) {
-		if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-
-		const entryPath = path.join(dir, entry.name);
-
-		// 1. Direct files: *.ts or *.js
-		if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionModuleFile(entry.name)) {
-			if (shouldIgnore(ig, dir, entryPath, false)) continue;
-			discovered.push(entryPath);
-			continue;
-		}
-
-		// 2 & 3. Subdirectories
-		if (entry.isDirectory() || entry.isSymbolicLink()) {
-			if (shouldIgnore(ig, dir, entryPath, true)) continue;
-
-			const subEntries = await readDirEntries(entryPath);
-			const subFileNames = new Set(subEntries.filter(e => e.isFile()).map(e => e.name));
-
-			// Check for package.json with "omp"/"pi" field first
-			if (subFileNames.has("package.json")) {
-				const packageJsonPath = path.join(entryPath, "package.json");
-				const manifest = await readExtensionModuleManifest(ctx, packageJsonPath);
-				if (manifest?.extensions && Array.isArray(manifest.extensions)) {
-					for (const extPath of manifest.extensions) {
-						const resolvedExtPath = path.resolve(entryPath, extPath);
-						const content = await readFile(resolvedExtPath);
-						if (content !== null) {
-							discovered.push(resolvedExtPath);
-						}
-					}
-					continue;
-				}
-			}
-
-			// Check for index.ts or index.js
-			if (subFileNames.has("index.ts")) {
-				discovered.push(path.join(entryPath, "index.ts"));
-			} else if (subFileNames.has("index.js")) {
-				discovered.push(path.join(entryPath, "index.js"));
+	// Process direct files
+	for (const match of directFiles) {
+		if (match.path.includes("/")) continue;
+		discovered.add(path.join(dir, match.path));
+	}
+	// Track which subdirectories have package.json manifests with declared extensions
+	const subdirsWithDeclaredExtensions = new Set<string>();
+	for (const match of packageJsonFiles) {
+		const subdir = path.dirname(match.path); // e.g., "my-extension"
+		const packageJsonPath = path.join(dir, match.path);
+		const manifest = await readExtensionModuleManifest(_ctx, packageJsonPath);
+		const declaredExtensions =
+			manifest?.extensions?.filter((extPath): extPath is string => typeof extPath === "string") ?? [];
+		if (declaredExtensions.length === 0) continue;
+		subdirsWithDeclaredExtensions.add(subdir);
+		const subdirPath = path.join(dir, subdir);
+		for (const extPath of declaredExtensions) {
+			const resolvedExtPath = path.resolve(subdirPath, extPath);
+			const content = await readFile(resolvedExtPath);
+			if (content !== null) {
+				discovered.add(resolvedExtPath);
 			}
 		}
 	}
-
-	return discovered;
+	const preferredIndexBySubdir = new Map<string, string>();
+	for (const match of indexFiles) {
+		if (match.path.split("/").length !== 2) continue;
+		const subdir = path.dirname(match.path);
+		if (subdirsWithDeclaredExtensions.has(subdir)) continue;
+		const existing = preferredIndexBySubdir.get(subdir);
+		if (!existing || (existing.endsWith("index.js") && match.path.endsWith("index.ts"))) {
+			preferredIndexBySubdir.set(subdir, match.path);
+		}
+	}
+	for (const preferredPath of preferredIndexBySubdir.values()) {
+		discovered.add(path.join(dir, preferredPath));
+	}
+	return [...discovered];
 }
 
 /**

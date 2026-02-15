@@ -46,6 +46,7 @@ import {
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
+import { buildMemoryToolDeveloperInstructions, startMemoryStartupTask } from "./memories";
 import { AgentSession } from "./session/agent-session";
 import { AuthStorage } from "./session/auth-storage";
 import { convertToLlm } from "./session/messages";
@@ -322,6 +323,7 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
 	appendPrompt?: string;
+	repeatToolDescriptions?: boolean;
 }
 
 /**
@@ -333,6 +335,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
+		repeatToolDescriptions: options.repeatToolDescriptions,
 	});
 }
 
@@ -440,6 +443,58 @@ function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
 		api.on("session_shutdown", async (_event, ctx) =>
 			runOnSession({ reason: "shutdown", previousSessionFile: undefined }, ctx),
 		);
+		api.on("auto_compaction_start", async (event, ctx) =>
+			runOnSession({ reason: "auto_compaction_start", trigger: event.reason }, ctx),
+		);
+		api.on("auto_compaction_end", async (event, ctx) =>
+			runOnSession(
+				{
+					reason: "auto_compaction_end",
+					result: event.result,
+					aborted: event.aborted,
+					willRetry: event.willRetry,
+					errorMessage: event.errorMessage,
+				},
+				ctx,
+			),
+		);
+		api.on("auto_retry_start", async (event, ctx) =>
+			runOnSession(
+				{
+					reason: "auto_retry_start",
+					attempt: event.attempt,
+					maxAttempts: event.maxAttempts,
+					delayMs: event.delayMs,
+					errorMessage: event.errorMessage,
+				},
+				ctx,
+			),
+		);
+		api.on("auto_retry_end", async (event, ctx) =>
+			runOnSession(
+				{
+					reason: "auto_retry_end",
+					success: event.success,
+					attempt: event.attempt,
+					finalError: event.finalError,
+				},
+				ctx,
+			),
+		);
+		api.on("ttsr_triggered", async (event, ctx) =>
+			runOnSession({ reason: "ttsr_triggered", rules: event.rules }, ctx),
+		);
+		api.on("todo_reminder", async (event, ctx) =>
+			runOnSession(
+				{
+					reason: "todo_reminder",
+					todos: event.todos,
+					attempt: event.attempt,
+					maxAttempts: event.maxAttempts,
+				},
+				ctx,
+			),
+		);
 	};
 }
 
@@ -495,6 +550,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	time("settings");
 	initializeWithSettings(settings);
 	time("initializeWithSettings");
+	const skillsSettings = settings.getGroup("skills") as SkillsSettings;
+	const discoveredSkillsPromise =
+		options.skills === undefined ? discoverSkills(cwd, agentDir, skillsSettings) : undefined;
 
 	// Initialize provider preferences from settings
 	setPreferredSearchProvider(settings.get("providers.webSearch") ?? "auto");
@@ -503,6 +561,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd);
 	time("sessionManager");
 	const sessionId = sessionManager.getSessionId();
+	const modelApiKeyAvailability = new Map<string, boolean>();
+	const getModelAvailabilityKey = (candidate: Model): string =>
+		`${candidate.provider}\u0000${candidate.baseUrl ?? ""}`;
+	const hasModelApiKey = async (candidate: Model): Promise<boolean> => {
+		const availabilityKey = getModelAvailabilityKey(candidate);
+		const cached = modelApiKeyAvailability.get(availabilityKey);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const hasKey = !!(await modelRegistry.getApiKey(candidate, sessionId));
+		modelApiKeyAvailability.set(availabilityKey, hasKey);
+		return hasKey;
+	};
 
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
@@ -520,7 +592,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const parsedModel = parseModelString(defaultModelStr);
 		if (parsedModel) {
 			const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-			if (restoredModel && (await modelRegistry.getApiKey(restoredModel, sessionId))) {
+			if (restoredModel && (await hasModelApiKey(restoredModel))) {
 				model = restoredModel;
 			}
 		}
@@ -536,7 +608,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const parsedModel = parseModelString(settingsDefaultModel);
 			if (parsedModel) {
 				const settingsModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (settingsModel && (await modelRegistry.getApiKey(settingsModel, sessionId))) {
+				if (settingsModel && (await hasModelApiKey(settingsModel))) {
 					model = settingsModel;
 				}
 			}
@@ -546,10 +618,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Fall back to first available model with a valid API key
 	if (!model) {
 		const allModels = modelRegistry.getAll();
-		const keyResults = await Promise.all(
-			allModels.map(async m => ({ model: m, hasKey: !!(await modelRegistry.getApiKey(m, sessionId)) })),
-		);
-		model = keyResults.find(r => r.hasKey)?.model;
+		for (const candidate of allModels) {
+			if (await hasModelApiKey(candidate)) {
+				model = candidate;
+				break;
+			}
+		}
 		time("findAvailableModel");
 		if (model) {
 			if (modelFallbackMessage) {
@@ -561,6 +635,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				"No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 		}
 	}
+
+	time("findModel");
 
 	// For subagent sessions using GitHub Copilot, add X-Initiator header
 	// to ensure proper billing (agent-initiated vs user-initiated)
@@ -603,12 +679,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		skills = options.skills;
 		skillWarnings = [];
 	} else {
-		const skillsSettings = settings.getGroup("skills") as SkillsSettings;
-		const discovered = await discoverSkills(cwd, agentDir, skillsSettings);
+		const discovered = discoveredSkillsPromise ? await discoveredSkillsPromise : { skills: [], warnings: [] };
+		time("discoverSkills");
 		skills = discovered.skills;
 		skillWarnings = discovered.warnings;
 	}
-	time("discoverSkills");
+
 	debugStartup("sdk:discoverSkills");
 
 	// Discover rules
@@ -912,8 +988,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		emitEvent: event => cursorEventEmitter?.(event),
 	});
 
+	const repeatToolDescriptions = settings.get("repeatToolDescriptions");
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
+		const memoryInstructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
 		const defaultPrompt = await buildSystemPromptInternal({
 			cwd,
 			skills,
@@ -923,6 +1001,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			toolNames,
 			rules: rulebookRules,
 			skillsSettings: settings.getGroup("skills") as SkillsSettings,
+			appendSystemPrompt: memoryInstructions,
+			repeatToolDescriptions,
 		});
 
 		if (options.systemPrompt === undefined) {
@@ -939,6 +1019,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				rules: rulebookRules,
 				skillsSettings: settings.getGroup("skills") as SkillsSettings,
 				customPrompt: options.systemPrompt,
+				appendSystemPrompt: memoryInstructions,
+				repeatToolDescriptions,
 			});
 		}
 		return options.systemPrompt(defaultPrompt);
@@ -1132,6 +1214,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			logger.warn("LSP server warmup failed", { cwd, error: String(error) });
 		}
 	}
+
+	startMemoryStartupTask({
+		session,
+		settings,
+		modelRegistry,
+		agentDir,
+		taskDepth,
+	});
 
 	debugStartup("sdk:return");
 	return {

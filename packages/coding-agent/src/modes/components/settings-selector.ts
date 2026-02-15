@@ -20,7 +20,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
+import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 import { PluginSettingsComponent } from "./plugin-settings";
 import { getSettingsForTab, type SettingDef } from "./settings-defs";
@@ -41,6 +41,7 @@ function getTabBarTheme(): TabBarTheme {
 class SelectSubmenu extends Container {
 	#selectList: SelectList;
 	#previewText: Text | null = null;
+	#previewUpdateRequestId: number = 0;
 
 	constructor(
 		title: string,
@@ -49,7 +50,7 @@ class SelectSubmenu extends Container {
 		currentValue: string,
 		onSelect: (value: string) => void,
 		onCancel: () => void,
-		onSelectionChange?: (value: string) => void,
+		onSelectionChange?: (value: string) => void | Promise<void>,
 		private readonly getPreview?: () => string,
 	) {
 		super();
@@ -91,9 +92,19 @@ class SelectSubmenu extends Container {
 
 		if (onSelectionChange) {
 			this.#selectList.onSelectionChange = item => {
-				onSelectionChange(item.value);
-				// Update preview after the preview callback has applied changes
-				this.#updatePreview();
+				const requestId = ++this.#previewUpdateRequestId;
+				const result = onSelectionChange(item.value);
+				if (result && typeof (result as Promise<void>).then === "function") {
+					void (result as Promise<void>).finally(() => {
+						if (requestId === this.#previewUpdateRequestId) {
+							this.#updatePreview();
+						}
+					});
+					return;
+				}
+				if (requestId === this.#previewUpdateRequestId) {
+					this.#updatePreview();
+				}
 			};
 		}
 
@@ -153,7 +164,7 @@ export interface SettingsCallbacks {
 	/** Called when any setting value changes */
 	onChange: (path: SettingPath, newValue: unknown) => void;
 	/** Called for theme preview while browsing */
-	onThemePreview?: (theme: string) => void;
+	onThemePreview?: (theme: string) => void | Promise<void>;
 	/** Called for status line preview while configuring */
 	onStatusLinePreview?: (settings: StatusLinePreviewSettings) => void;
 	/** Get current rendered status line for inline preview */
@@ -299,17 +310,22 @@ export class SettingsSelectorComponent extends Container {
 				const baseOpt = options.find(o => o.value === level);
 				return baseOpt || { value: level, label: level };
 			});
-		} else if (def.path === "theme") {
+		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
 		}
 
 		// Preview handlers
-		let onPreview: ((value: string) => void) | undefined;
+		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
 
-		if (def.path === "theme") {
-			onPreview = this.callbacks.onThemePreview;
-			onPreviewCancel = () => this.callbacks.onThemePreview?.(currentValue);
+		const activeThemeBeforePreview = getCurrentThemeName() ?? currentValue;
+		if (def.path === "theme.dark" || def.path === "theme.light") {
+			onPreview = value => {
+				return this.callbacks.onThemePreview?.(value);
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onThemePreview?.(activeThemeBeforePreview);
+			};
 		} else if (def.path === "statusLine.preset") {
 			onPreview = value => {
 				const presetDef = getPreset(
@@ -347,7 +363,8 @@ export class SettingsSelectorComponent extends Container {
 		}
 
 		// Provide status line preview for theme selection
-		const getPreview = def.path === "theme" ? this.callbacks.getStatusLinePreview : undefined;
+		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
+		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
 
 		return new SelectSubmenu(
 			def.label,
@@ -355,9 +372,7 @@ export class SettingsSelectorComponent extends Container {
 			options,
 			currentValue,
 			value => {
-				// Persist
 				this.#setSettingValue(def.path, value);
-				// Notify
 				this.callbacks.onChange(def.path, value);
 				done(value);
 			},

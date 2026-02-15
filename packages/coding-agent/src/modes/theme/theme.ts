@@ -114,6 +114,8 @@ export type SymbolKey =
 	| "icon.extensionPrompt"
 	| "icon.extensionContextFile"
 	| "icon.extensionInstruction"
+	// STT
+	| "icon.mic"
 	// Thinking Levels
 	| "thinking.minimal"
 	| "thinking.low"
@@ -271,6 +273,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "✎",
 	"icon.extensionContextFile": "📎",
 	"icon.extensionInstruction": "📘",
+	// STT
+	"icon.mic": "🎤",
 	// Thinking levels
 	"thinking.minimal": "◔ min",
 	"thinking.low": "◑ low",
@@ -507,6 +511,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.extensionContextFile": "\uf0f6",
 	// pick:  | alt:  
 	"icon.extensionInstruction": "\uf02d",
+	// STT - fa-microphone
+	"icon.mic": "\uf130",
 	// Thinking Levels - emoji labels
 	// pick: 🤨 min | alt:  min  min
 	"thinking.minimal": "\u{F0E7} min",
@@ -676,6 +682,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "PR",
 	"icon.extensionContextFile": "CF",
 	"icon.extensionInstruction": "IN",
+	// STT
+	"icon.mic": "MIC",
 	// Thinking Levels
 	"thinking.minimal": "[min]",
 	"thinking.low": "[low]",
@@ -1374,6 +1382,7 @@ export class Theme {
 			extensionPrompt: this.#symbols["icon.extensionPrompt"],
 			extensionContextFile: this.#symbols["icon.extensionContextFile"],
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
+			mic: this.#symbols["icon.mic"],
 		};
 	}
 
@@ -1624,7 +1633,8 @@ function detectTerminalBackground(): "dark" | "light" {
 }
 
 function getDefaultTheme(): string {
-	return detectTerminalBackground();
+	const bg = detectTerminalBackground();
+	return bg === "light" ? autoLightTheme : autoDarkTheme;
 }
 
 // ============================================================================
@@ -1633,10 +1643,20 @@ function getDefaultTheme(): string {
 
 export var theme: Theme;
 var currentThemeName: string | undefined;
+
+/** Get the name of the currently active theme. */
+export function getCurrentThemeName(): string | undefined {
+	return currentThemeName;
+}
 var currentSymbolPresetOverride: SymbolPreset | undefined;
 var currentColorBlindMode: boolean = false;
 var themeWatcher: fs.FSWatcher | undefined;
+var sigwinchHandler: (() => void) | undefined;
+var autoDetectedTheme: boolean = false;
+var autoDarkTheme: string = "dark";
+var autoLightTheme: string = "light";
 var onThemeChangeCallback: (() => void) | undefined;
+var themeLoadRequestId: number = 0;
 
 function getCurrentThemeOptions(): CreateThemeOptions {
 	return {
@@ -1646,12 +1666,16 @@ function getCurrentThemeOptions(): CreateThemeOptions {
 }
 
 export async function initTheme(
-	themeName?: string,
 	enableWatcher: boolean = false,
 	symbolPreset?: SymbolPreset,
 	colorBlindMode?: boolean,
+	darkTheme?: string,
+	lightTheme?: string,
 ): Promise<void> {
-	const name = themeName ?? getDefaultTheme();
+	autoDetectedTheme = true;
+	autoDarkTheme = darkTheme ?? "dark";
+	autoLightTheme = lightTheme ?? "light";
+	const name = getDefaultTheme();
 	currentThemeName = name;
 	currentSymbolPresetOverride = symbolPreset;
 	currentColorBlindMode = colorBlindMode ?? false;
@@ -1659,6 +1683,7 @@ export async function initTheme(
 		theme = await loadTheme(name, getCurrentThemeOptions());
 		if (enableWatcher) {
 			await startThemeWatcher();
+			startSigwinchListener();
 		}
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
@@ -1672,9 +1697,15 @@ export async function setTheme(
 	name: string,
 	enableWatcher: boolean = false,
 ): Promise<{ success: boolean; error?: string }> {
+	autoDetectedTheme = false;
 	currentThemeName = name;
+	const requestId = ++themeLoadRequestId;
 	try {
-		theme = await loadTheme(name, getCurrentThemeOptions());
+		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId) {
+			return { success: false, error: "Theme change superseded by a newer request" };
+		}
+		theme = loadedTheme;
 		if (enableWatcher) {
 			await startThemeWatcher();
 		}
@@ -1683,6 +1714,9 @@ export async function setTheme(
 		}
 		return { success: true };
 	} catch (error) {
+		if (requestId !== themeLoadRequestId) {
+			return { success: false, error: "Theme change superseded by a newer request" };
+		}
 		// Theme is invalid - fall back to dark theme
 		currentThemeName = "dark";
 		theme = await loadTheme("dark", getCurrentThemeOptions());
@@ -1694,7 +1728,74 @@ export async function setTheme(
 	}
 }
 
+export async function previewTheme(name: string): Promise<{ success: boolean; error?: string }> {
+	const requestId = ++themeLoadRequestId;
+	try {
+		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId) {
+			return { success: false, error: "Theme preview superseded by a newer request" };
+		}
+		theme = loadedTheme;
+		if (onThemeChangeCallback) {
+			onThemeChangeCallback();
+		}
+		return { success: true };
+	} catch (error) {
+		if (requestId !== themeLoadRequestId) {
+			return { success: false, error: "Theme preview superseded by a newer request" };
+		}
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+/**
+ * Enable auto-detection mode, switching to the appropriate dark/light theme.
+ */
+export function enableAutoTheme(): void {
+	autoDetectedTheme = true;
+	const resolved = getDefaultTheme();
+	if (resolved === currentThemeName) return;
+	currentThemeName = resolved;
+	loadTheme(resolved, getCurrentThemeOptions())
+		.then(loadedTheme => {
+			theme = loadedTheme;
+			if (onThemeChangeCallback) {
+				onThemeChangeCallback();
+			}
+		})
+		.catch(err => {
+			logger.debug("Auto theme switch failed", { error: String(err) });
+		});
+}
+
+/**
+ * Update the theme mappings for auto-detection mode.
+ * When a dark/light mapping changes and auto-detection is active, re-evaluate the theme.
+ */
+export function setAutoThemeMapping(mode: "dark" | "light", themeName: string): void {
+	if (mode === "dark") autoDarkTheme = themeName;
+	else autoLightTheme = themeName;
+	if (!autoDetectedTheme) return;
+	const resolved = getDefaultTheme();
+	if (resolved === currentThemeName) return;
+	currentThemeName = resolved;
+	loadTheme(resolved, getCurrentThemeOptions())
+		.then(loadedTheme => {
+			theme = loadedTheme;
+			if (onThemeChangeCallback) {
+				onThemeChangeCallback();
+			}
+		})
+		.catch(err => {
+			logger.debug("Auto theme mapping switch failed", { error: String(err) });
+		});
+}
+
 export function setThemeInstance(themeInstance: Theme): void {
+	autoDetectedTheme = false;
 	theme = themeInstance;
 	currentThemeName = "<in-memory>";
 	stopThemeWatcher();
@@ -1836,11 +1937,41 @@ async function startThemeWatcher(): Promise<void> {
 	}
 }
 
+/** Re-check COLORFGBG on SIGWINCH and switch dark/light when using auto-detected theme. */
+function startSigwinchListener(): void {
+	stopSigwinchListener();
+	sigwinchHandler = () => {
+		if (!autoDetectedTheme) return;
+		const resolved = getDefaultTheme();
+		if (resolved === currentThemeName) return;
+		currentThemeName = resolved;
+		loadTheme(resolved, getCurrentThemeOptions())
+			.then(loadedTheme => {
+				theme = loadedTheme;
+				if (onThemeChangeCallback) {
+					onThemeChangeCallback();
+				}
+			})
+			.catch(err => {
+				logger.debug("Theme switch on SIGWINCH failed", { error: String(err) });
+			});
+	};
+	process.on("SIGWINCH", sigwinchHandler);
+}
+
+function stopSigwinchListener(): void {
+	if (sigwinchHandler) {
+		process.removeListener("SIGWINCH", sigwinchHandler);
+		sigwinchHandler = undefined;
+	}
+}
+
 export function stopThemeWatcher(): void {
 	if (themeWatcher) {
 		themeWatcher.close();
 		themeWatcher = undefined;
 	}
+	stopSigwinchListener();
 }
 
 // ============================================================================
@@ -1921,11 +2052,36 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 }
 
 /**
- * Check if a theme is a "light" theme (for CSS that needs light/dark variants).
+ * Check if a theme is a "light" theme by analyzing its background color luminance.
+ * Loads theme JSON synchronously (built-in or custom file) and resolves userMessageBg.
  */
 export function isLightTheme(themeName?: string): boolean {
-	// Currently just check the name - could be extended to analyze colors
-	return themeName === "light";
+	const name = themeName ?? "dark";
+	const builtinThemes = getBuiltinThemes();
+	let themeJson: ThemeJson | undefined;
+	if (name in builtinThemes) {
+		themeJson = builtinThemes[name];
+	} else {
+		try {
+			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
+			const content = fs.readFileSync(customPath, "utf-8");
+			themeJson = JSON.parse(content) as ThemeJson;
+		} catch {
+			return false;
+		}
+	}
+	try {
+		const resolved = resolveVarRefs(themeJson.colors.userMessageBg, themeJson.vars ?? {});
+		if (typeof resolved !== "string" || !resolved.startsWith("#") || resolved.length !== 7) return false;
+		const r = parseInt(resolved.slice(1, 3), 16) / 255;
+		const g = parseInt(resolved.slice(3, 5), 16) / 255;
+		const b = parseInt(resolved.slice(5, 7), 16) / 255;
+		// Relative luminance (ITU-R BT.709)
+		const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		return luminance > 0.5;
+	} catch {
+		return false;
+	}
 }
 
 /**

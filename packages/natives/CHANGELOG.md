@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [12.5.0] - 2026-02-15
+### Added
+
+- Added `recursive` option to `GlobOptions` to control whether simple patterns match recursively (defaults to true)
+
+### Changed
+
+- Changed default glob pattern behavior to always use recursive matching for simple patterns instead of requiring explicit `**/` prefix
+- Updated `fileType` filter documentation to clarify that symlinks match file/dir filters based on their target type
+
+## [12.4.0] - 2026-02-14
+### Added
+
+- Exported `sanitizeText` function to strip ANSI codes, remove binary garbage, and normalize line endings in text output
+
 ## [12.1.0] - 2026-02-13
 ### Added
 

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { readImageFromClipboard } from "@oh-my-pi/pi-natives";
+import { copyToClipboard, readImageFromClipboard, sanitizeText } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { SettingPath, SettingValue } from "../../config/settings";
 import { settings } from "../../config/settings";
@@ -74,6 +74,7 @@ export class InputController {
 		this.ctx.editor.onCtrlG = () => void this.openExternalEditor();
 		this.ctx.editor.onQuestionMark = () => this.ctx.handleHotkeysCommand();
 		this.ctx.editor.onCtrlV = () => this.handleImagePaste();
+		this.ctx.editor.onCopyPrompt = () => this.handleCopyPrompt();
 
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
@@ -111,6 +112,9 @@ export class InputController {
 		}
 		for (const key of this.ctx.keybindings.getKeys("followUp")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
+		}
+		for (const key of this.ctx.keybindings.getKeys("toggleSTT")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
 		}
 
 		this.ctx.editor.onChange = (text: string) => {
@@ -333,6 +337,11 @@ export class InputController {
 				this.ctx.editor.setText("");
 				return;
 			}
+			if (text === "/memory" || text.startsWith("/memory ")) {
+				this.ctx.editor.setText("");
+				await this.ctx.handleMemoryCommand(text);
+				return;
+			}
 			if (text === "/resume") {
 				this.ctx.showSessionSelector();
 				this.ctx.editor.setText("");
@@ -343,7 +352,6 @@ export class InputController {
 				void this.ctx.shutdown();
 				return;
 			}
-
 			// Handle MCP server management commands
 			if (text === "/mcp" || text.startsWith("/mcp ")) {
 				this.ctx.editor.addToHistory(text);
@@ -665,6 +673,24 @@ export class InputController {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
 		}
+	}
+
+	/** Copy current prompt text to system clipboard. */
+	handleCopyPrompt(): void {
+		const text = this.ctx.editor.getText();
+		if (!text) {
+			this.ctx.showStatus("Nothing to copy");
+			return;
+		}
+		copyToClipboard(text)
+			.then(() => {
+				const sanitized = sanitizeText(text);
+				const preview = sanitized.length > 30 ? `${sanitized.slice(0, 30)}...` : sanitized;
+				this.ctx.showStatus(`Copied: ${preview}`);
+			})
+			.catch(() => {
+				this.ctx.showWarning("Failed to copy to clipboard");
+			});
 	}
 
 	cycleThinkingLevel(): void {

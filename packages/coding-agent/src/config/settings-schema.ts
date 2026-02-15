@@ -7,7 +7,7 @@
  *
  * The Settings singleton provides type-safe path-based access:
  *   settings.get("compaction.enabled")  // => boolean
- *   settings.set("theme", "dark")       // sync, saves in background
+ *   settings.set("theme.dark", "titanium")  // sync, saves in background
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -141,10 +141,25 @@ export const SETTINGS_SCHEMA = {
 	// Top-level settings
 	// ─────────────────────────────────────────────────────────────────────────
 	lastChangelogVersion: { type: "string", default: undefined },
-	theme: {
+	"theme.dark": {
 		type: "string",
-		default: undefined,
-		ui: { tab: "display", label: "Theme", description: "Color theme for the interface", submenu: true },
+		default: "titanium",
+		ui: {
+			tab: "display",
+			label: "Dark theme",
+			description: "Theme used when terminal has dark background",
+			submenu: true,
+		},
+	},
+	"theme.light": {
+		type: "string",
+		default: "light",
+		ui: {
+			tab: "display",
+			label: "Light theme",
+			description: "Theme used when terminal has light background",
+			submenu: true,
+		},
 	},
 	symbolPreset: {
 		type: "enum",
@@ -238,6 +253,15 @@ export const SETTINGS_SCHEMA = {
 			description: "Rewrite tool call arguments to normalized format in session history",
 		},
 	},
+	repeatToolDescriptions: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "agent",
+			label: "Repeat tool descriptions",
+			description: "Render full tool descriptions in the system prompt instead of a tool name list",
+		},
+	},
 	readLineNumbers: {
 		type: "boolean",
 		default: false,
@@ -302,6 +326,33 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "agent", label: "Branch summaries", description: "Prompt to summarize when leaving a branch" },
 	},
 	"branchSummary.reserveTokens": { type: "number", default: 16384 },
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Memories settings
+	// ─────────────────────────────────────────────────────────────────────────
+	"memories.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "agent",
+			label: "Memories",
+			description: "Enable autonomous memory extraction and consolidation",
+		},
+	},
+	"memories.maxRolloutsPerStartup": { type: "number", default: 64 },
+	"memories.maxRolloutAgeDays": { type: "number", default: 30 },
+	"memories.minRolloutIdleHours": { type: "number", default: 12 },
+	"memories.threadScanLimit": { type: "number", default: 300 },
+	"memories.maxRawMemoriesForGlobal": { type: "number", default: 200 },
+	"memories.stage1Concurrency": { type: "number", default: 8 },
+	"memories.stage1LeaseSeconds": { type: "number", default: 120 },
+	"memories.stage1RetryDelaySeconds": { type: "number", default: 120 },
+	"memories.phase2LeaseSeconds": { type: "number", default: 180 },
+	"memories.phase2RetryDelaySeconds": { type: "number", default: 180 },
+	"memories.phase2HeartbeatSeconds": { type: "number", default: 30 },
+	"memories.rolloutPayloadPercent": { type: "number", default: 0.7 },
+	"memories.fallbackTokenLimit": { type: "number", default: 16000 },
+	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Retry settings
@@ -730,6 +781,36 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
+	// STT settings
+	// ─────────────────────────────────────────────────────────────────────────
+	"stt.enabled": {
+		type: "boolean",
+		default: false,
+		ui: { tab: "input", label: "Speech-to-text", description: "Enable speech-to-text input via microphone" },
+	},
+	"stt.language": {
+		type: "string",
+		default: "en",
+		ui: {
+			tab: "input",
+			label: "STT language",
+			description: "Language code for transcription (e.g., en, es, fr)",
+			submenu: true,
+		},
+	},
+	"stt.modelName": {
+		type: "enum",
+		values: ["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large"] as const,
+		default: "base.en",
+		ui: {
+			tab: "input",
+			label: "STT model",
+			description: "Whisper model size (larger = more accurate but slower)",
+			submenu: true,
+		},
+	},
+
+	// ─────────────────────────────────────────────────────────────────────────
 	// Edit settings
 	// ─────────────────────────────────────────────────────────────────────────
 	"edit.fuzzyMatch": {
@@ -952,6 +1033,24 @@ export interface RetrySettings {
 	baseDelayMs: number;
 }
 
+export interface MemoriesSettings {
+	enabled: boolean;
+	maxRolloutsPerStartup: number;
+	maxRolloutAgeDays: number;
+	minRolloutIdleHours: number;
+	threadScanLimit: number;
+	maxRawMemoriesForGlobal: number;
+	stage1Concurrency: number;
+	stage1LeaseSeconds: number;
+	stage1RetryDelaySeconds: number;
+	phase2LeaseSeconds: number;
+	phase2RetryDelaySeconds: number;
+	phase2HeartbeatSeconds: number;
+	rolloutPayloadPercent: number;
+	fallbackTokenLimit: number;
+	summaryInjectionTokenLimit: number;
+}
+
 export interface TodoCompletionSettings {
 	enabled: boolean;
 	maxReminders: number;
@@ -1016,6 +1115,14 @@ export interface ThinkingBudgetsSettings {
 	high: number;
 }
 
+export interface SttSettings {
+	enabled: boolean;
+	language: string | undefined;
+	modelName: string;
+	whisperPath: string | undefined;
+	modelPath: string | undefined;
+}
+
 export interface BashInterceptorRule {
 	pattern: string;
 	flags?: string;
@@ -1028,6 +1135,7 @@ export interface BashInterceptorRule {
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
 	retry: RetrySettings;
+	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;
 	skills: SkillsSettings;
 	commit: CommitSettings;
@@ -1035,6 +1143,7 @@ export interface GroupTypeMap {
 	exa: ExaSettings;
 	statusLine: StatusLineSettings;
 	thinkingBudgets: ThinkingBudgetsSettings;
+	stt: SttSettings;
 	modelRoles: Record<string, string>;
 }
 

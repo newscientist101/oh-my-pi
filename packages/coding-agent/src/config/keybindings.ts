@@ -8,7 +8,7 @@ import {
 	matchesKey,
 	setEditorKeybindings,
 } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 /**
@@ -35,7 +35,8 @@ export type AppAction =
 	| "newSession"
 	| "tree"
 	| "fork"
-	| "resume";
+	| "resume"
+	| "toggleSTT";
 
 /**
  * All configurable actions.
@@ -74,6 +75,7 @@ export const DEFAULT_APP_KEYBINDINGS: Record<AppAction, KeyId | KeyId[]> = {
 	tree: [],
 	fork: [],
 	resume: [],
+	toggleSTT: "alt+h",
 };
 
 /**
@@ -107,6 +109,7 @@ const APP_ACTIONS: AppAction[] = [
 	"tree",
 	"fork",
 	"resume",
+	"toggleSTT",
 ];
 
 function isAppAction(action: string): action is AppAction {
@@ -204,6 +207,7 @@ export class KeybindingsManager {
 		try {
 			return await Bun.file(path).json();
 		} catch (error) {
+			if (isEnoent(error)) return {};
 			logger.warn("Failed to parse keybindings config", { path, error: String(error) });
 			return {};
 		}

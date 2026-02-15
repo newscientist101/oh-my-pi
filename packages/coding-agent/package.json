@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "12.2.1",
+	"version": "12.5.1",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"bin": {
@@ -78,7 +78,7 @@
 	"scripts": {
 		"check": "tsgo -p tsconfig.json",
 		"format-prompts": "bun scripts/format-prompts.ts",
-		"build:binary": "cd ../.. && bun --cwd=packages/natives run embed:native && bun build --compile --define PI_COMPILED=true --root . ./packages/coding-agent/src/cli.ts --outfile packages/coding-agent/dist/omp && bun --cwd=packages/natives run embed:native --reset",
+		"build:binary": "cd ../.. && bun --cwd=packages/stats scripts/generate-client-bundle.ts && bun --cwd=packages/natives run embed:native && bun build --compile --define PI_COMPILED=true --root . ./packages/coding-agent/src/cli.ts --outfile packages/coding-agent/dist/omp && bun --cwd=packages/natives run embed:native --reset && bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset",
 		"generate-template": "bun scripts/generate-template.ts",
 		"test": "bun test"
 	},
@@ -92,17 +92,17 @@
 		"@oh-my-pi/pi-utils": "workspace:*",
 		"@sinclair/typebox": "^0.34.48",
 		"@xterm/headless": "^6.0.0",
-		"ajv": "^8.17.1",
+		"ajv": "^8.18.0",
 		"chalk": "^5.6.2",
 		"diff": "^8.0.3",
 		"file-type": "^21.3.0",
-		"glob": "^13.0.1",
+		"glob": "^13.0.3",
 		"handlebars": "^4.7.8",
 		"ignore": "^7.0.5",
 		"linkedom": "^0.18.12",
-		"marked": "^17.0.1",
+		"marked": "^17.0.2",
 		"node-html-parser": "^7.0.2",
-		"puppeteer": "^24.37.1",
+		"puppeteer": "^24.37.3",
 		"smol-toml": "^1.6.0",
 		"zod": "^4.3.6"
 	},

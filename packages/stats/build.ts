@@ -1,9 +1,72 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { compile } from "tailwindcss";
+
+/**
+ * Extract Tailwind class names from source files by scanning for className attributes.
+ */
+async function extractTailwindClasses(dir: string): Promise<Set<string>> {
+	const classes = new Set<string>();
+	const classPattern = /className\s*=\s*["'`]([^"'`]+)["'`]/g;
+
+	async function scanDir(currentDir: string): Promise<void> {
+		const entries = await fs.readdir(currentDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const fullPath = path.join(currentDir, entry.name);
+			if (entry.isDirectory()) {
+				await scanDir(fullPath);
+			} else if (entry.isFile() && /\.(tsx|ts|jsx|js)$/.test(entry.name)) {
+				const content = await Bun.file(fullPath).text();
+				const matches = content.matchAll(classPattern);
+				for (const match of matches) {
+					for (const cls of match[1].split(/\s+/)) {
+						if (cls) classes.add(cls);
+					}
+				}
+			}
+		}
+	}
+
+	await scanDir(dir);
+	return classes;
+}
 
 // Clean dist
 await fs.rm("./dist/client", { recursive: true, force: true });
 
+// Build Tailwind CSS
+console.log("Building Tailwind CSS...");
+const sourceCss = await Bun.file("./src/client/styles.css").text();
+const candidates = await extractTailwindClasses("./src/client");
+const baseDir = path.resolve("./src/client");
+
+// Provide loadStylesheet for @import "tailwindcss" to work
+const compiler = await compile(sourceCss, {
+	base: baseDir,
+	loadStylesheet: async (id: string, base: string) => {
+		// Handle tailwindcss import
+		if (id === "tailwindcss/index.css" || id === "tailwindcss") {
+			const tailwindPath = require.resolve("tailwindcss/index.css", { paths: [base] });
+			return {
+				path: tailwindPath,
+				base: path.dirname(tailwindPath),
+				content: await Bun.file(tailwindPath).text(),
+			};
+		}
+		// Handle other imports relative to base
+		const resolved = path.resolve(base, id);
+		return {
+			path: resolved,
+			base: path.dirname(resolved),
+			content: await Bun.file(resolved).text(),
+		};
+	},
+});
+const tailwindOutput = compiler.build([...candidates]);
+await Bun.write("./dist/client/styles.css", tailwindOutput);
+
 // Build React app
+console.log("Building React app...");
 const result = await Bun.build({
 	entrypoints: ["./src/client/index.tsx"],
 	outdir: "./dist/client",
@@ -26,32 +89,7 @@ const indexHtml = `<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Usage Statistics</title>
-    <style>
-        :root {
-            --bg-primary: #1a1a2e;
-            --bg-secondary: #16213e;
-            --bg-card: #0f3460;
-            --text-primary: #eee;
-            --text-secondary: #aaa;
-            --accent: #e94560;
-            --success: #4ade80;
-            --error: #f87171;
-            --border: #1f2937;
-        }
-        body { 
-            margin: 0; 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-        }
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: var(--bg-primary); }
-        ::-webkit-scrollbar-thumb { background: var(--bg-card); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
-        .spin { animation: spin 1s linear infinite; }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
-    </style>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div id="root"></div>
